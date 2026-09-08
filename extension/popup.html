@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OmniRoute Session Sync</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <div class="logo-group">
+      <div class="logo-icon">⚡</div>
+      <div>
+        <h1>OmniRoute Sync</h1>
+        <div class="subtitle">Auto-Sync Chrome Cookies</div>
+      </div>
+    </div>
+    <div id="bridgeStatusBadge" class="badge badge-offline">Checking...</div>
+  </div>
+
+  <div class="main-actions">
+    <button id="syncAllBtn" class="btn btn-primary">
+      <span class="btn-icon">🔄</span> Sync All Active Sessions
+    </button>
+  </div>
+
+  <div class="section-title">MONITORED WEB PROVIDERS</div>
+  <div id="providersList" class="providers-list">
+    <div class="loading">Inspecting browser sessions...</div>
+  </div>
+
+  <div class="footer">
+    <div id="lastSyncLabel" class="last-sync">Last synced: Never</div>
+    <div class="links">
+      <a href="http://localhost:20128" target="_blank">Open OmniRoute UI</a>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

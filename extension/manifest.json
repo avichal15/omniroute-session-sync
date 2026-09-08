@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "OmniRoute Session Sync",
+  "version": "1.0.1",
+  "description": "Automated real-time cookie & session sync from Chrome to OmniRoute",
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://*.chatgpt.com/*",
+    "*://chatgpt.com/*",
+    "*://*.openai.com/*",
+    "*://openai.com/*",
+    "*://*.google.com/*",
+    "*://google.com/*",
+    "*://*.gemini.google.com/*",
+    "*://gemini.google.com/*",
+    "*://*.z.ai/*",
+    "*://z.ai/*",
+    "*://*.chat.z.ai/*",
+    "*://chat.z.ai/*",
+    "*://*.qwen.ai/*",
+    "*://qwen.ai/*",
+    "*://*.chat.qwen.ai/*",
+    "*://chat.qwen.ai/*",
+    "*://*.deepseek.com/*",
+    "*://deepseek.com/*",
+    "*://*.chat.deepseek.com/*",
+    "*://chat.deepseek.com/*",
+    "*://*.grok.com/*",
+    "*://grok.com/*",
+    "*://*.x.com/*",
+    "*://x.com/*",
+    "*://*.kimi.com/*",
+    "*://kimi.com/*",
+    "*://*.claude.ai/*",
+    "*://claude.ai/*",
+    "*://*.perplexity.ai/*",
+    "*://perplexity.ai/*",
+    "http://127.0.0.1:20129/*",
+    "http://localhost:20129/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "OmniRoute Session Sync",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

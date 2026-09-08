@@ -1,0 +1,9 @@
+{
+  "port": 20129,
+  "host": "127.0.0.1",
+  "omnirouteDataDir": "C:/Users/avich/.omniroute",
+  "dbPath": "C:/Users/avich/.omniroute/storage.sqlite",
+  "envPath": "C:/Users/avich/.omniroute/.env",
+  "autoTestAfterSync": false,
+  "logLimit": 100
+}
