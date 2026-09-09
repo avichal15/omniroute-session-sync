@@ -16,12 +16,24 @@ Supported providers: ChatGPT Web, Gemini Web, Z.ai Web, Qwen Web, Grok Web, and 
 ## Setup
 
 1. In OmniRoute, turn off Cloud Sync if sessions should remain on this PC. The bridge refuses credential updates, connection tests, and fallback changes unless OmniRoute explicitly reports cloud sync disabled. Keep `allowCloudSync: false` in `bridge/config.json`.
-2. Start the bridge from this project folder:
+2. Start the bridge using either Embedded Mode (recommended) or Standalone Mode:
 
+   ### Option A: Embedded Mode (Single-Process, Auto-Start with OmniRoute)
+   Run the one-time embedded installer:
+   ```powershell
+   npm run setup:embedded
+   ```
+   This safely configures OmniRoute's `.env` with a main-thread `--import` preload and updates the silent Windows Startup launcher. The sync bridge starts automatically whenever OmniRoute launches without requiring a separate terminal window. Prior environment files and startup scripts are backed up to `%LOCALAPPDATA%\OmniRouteSessionSync\backups`.
+   To start OmniRoute with Session Sync immediately:
+   ```powershell
+   npm run start:integrated
+   ```
+
+   ### Option B: Standalone Mode
+   Run the bridge independently from this folder:
    ```powershell
    npm start
    ```
-
    It listens on `http://127.0.0.1:20129`. Keep that terminal running. `scripts/start-bridge.bat` is an alternative.
 
 3. Give the bridge a dedicated OmniRoute key with the `manage` scope. If OmniRoute's local CLI authentication already works, this step is unnecessary. Otherwise create the key in OmniRoute and pass it through standard input, not a command argument:
