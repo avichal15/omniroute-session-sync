@@ -11,6 +11,8 @@
     "check": "node scripts/check.mjs",
     "pair": "node scripts/pair.mjs",
     "status": "node scripts/status.mjs",
-    "configure": "node scripts/configure-gateway.mjs"
+    "configure": "node scripts/configure-gateway.mjs",
+    "setup:embedded": "node scripts/install-embedded.mjs",
+    "start:integrated": "node scripts/start-integrated.mjs"
   }
 }
