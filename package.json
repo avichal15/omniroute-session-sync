@@ -13,6 +13,7 @@
     "status": "node scripts/status.mjs",
     "configure": "node scripts/configure-gateway.mjs",
     "setup:embedded": "node scripts/install-embedded.mjs",
-    "start:integrated": "node scripts/start-integrated.mjs"
+    "start:integrated": "node scripts/start-integrated.mjs",
+    "verify": "node scripts/check.mjs && node scripts/test-sync.mjs"
   }
 }
