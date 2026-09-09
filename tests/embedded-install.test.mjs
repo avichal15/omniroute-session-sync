@@ -36,7 +36,9 @@ test('Windows startup uses absolute quoted paths and a hidden launch', () => {
   const source = startupVbs('C:\\Program Files\\nodejs\\node.exe', 'C:\\My Project\\scripts\\start-integrated.mjs');
   assert.ok(source.includes('""C:\\Program Files\\nodejs\\node.exe""'));
   assert.ok(source.includes('""C:\\My Project\\scripts\\start-integrated.mjs""'));
-  assert.ok(source.includes(', 0, False'));
+  assert.ok(source.includes('--watch'));
+  assert.ok(source.includes(', 0, True)'));
+  assert.ok(source.includes('WScript.Quit ExitCode'));
   assert.ok(!source.includes('cmd.exe'));
 });
 
@@ -45,7 +47,10 @@ test('hidden launcher starts the CLI with its preload and avoids a duplicate gat
   const directory = await fs.mkdtemp(path.join(root, 'omni-launcher-test-'));
   let pid;
   t.after(async () => {
-    if (pid) { try { process.kill(pid); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+    if (pid) {
+      if (process.platform === 'win32') await promisify(execFile)('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }).catch(() => {});
+      else { try { process.kill(pid); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+    }
     assert.equal(path.dirname(path.resolve(directory)), root);
     assert.ok(path.basename(directory).startsWith('omni-launcher-test-'));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
@@ -55,13 +60,16 @@ test('hidden launcher starts the CLI with its preload and avoids a duplicate gat
   const port = probe.address().port;
   await new Promise(resolve => probe.close(resolve));
   await fs.mkdir(path.join(directory, 'bridge'));
-  await fs.writeFile(path.join(directory, 'bridge', 'config.json'), JSON.stringify({ omnirouteBaseUrl: `http://127.0.0.1:${port}` }));
+  await fs.writeFile(path.join(directory, 'bridge', 'config.json'), JSON.stringify({ host: '127.0.0.1', port, omnirouteBaseUrl: `http://127.0.0.1:${port}` }));
   const marker = path.join(directory, 'started.json');
   const hook = path.join(directory, 'hook.mjs');
   await fs.writeFile(hook, 'globalThis.embeddedTestPreloaded=true;');
   const cli = path.join(directory, 'cli.mjs');
-  await fs.writeFile(cli, `import net from 'node:net';import fs from 'node:fs';
-    net.createServer().listen(${port},'127.0.0.1',()=>fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({args:process.argv.slice(2),preloaded:globalThis.embeddedTestPreloaded,nodeOptions:process.env.NODE_OPTIONS})));`);
+  await fs.writeFile(cli, `import http from 'node:http';import fs from 'node:fs';
+    const startedAt=Date.now();
+    http.createServer((req,res)=>{const ready=Date.now()-startedAt>250;res.writeHead(ready?200:503,{'Content-Type':'application/json'});
+      res.end(JSON.stringify({service:'omniroute-session-sync',ready,runtime:{lifecycle:'omniroute',processId:process.pid}}));
+    }).listen(${port},'127.0.0.1',()=>fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({args:process.argv.slice(2),preloaded:globalThis.embeddedTestPreloaded,nodeOptions:process.env.NODE_OPTIONS,startedAt})));`);
   const envFile = path.join(directory, '.env');
   await fs.writeFile(envFile, 'NODE_OPTIONS=--trace-warnings\n');
   await fs.writeFile(path.join(directory, 'installation.json'), JSON.stringify({ version: 1, nodePath: process.execPath,
@@ -71,6 +79,7 @@ test('hidden launcher starts the CLI with its preload and avoids a duplicate gat
   const env = { ...process.env, OMNI_SYNC_DATA_DIR: directory, NODE_OPTIONS: '--no-warnings' };
   const first = JSON.parse((await exec(process.execPath, [launcher], { env, windowsHide: true })).stdout);
   assert.equal(first.started, true); pid = first.processId;
+  assert.equal(first.ready, true, 'A successful spawn must not be reported as a ready gateway');
   let started;
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline) {
@@ -78,6 +87,7 @@ test('hidden launcher starts the CLI with its preload and avoids a duplicate gat
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.ok(started, 'The expected CLI entrypoint must actually start');
+  assert.ok(Date.now() - started.startedAt >= 250, 'An open port must not count as readiness during initialization');
   assert.deepEqual(started.args, ['serve', '--no-open']);
   assert.equal(started.preloaded, true);
   assert.ok(started.nodeOptions.includes('--no-warnings'));
