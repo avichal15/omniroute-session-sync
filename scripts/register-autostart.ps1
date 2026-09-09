@@ -61,7 +61,8 @@ $task = $null
 try { $task = $folder.GetTask($TaskName) } catch {
     if ($_.Exception.HResult -ne -2147024894) { throw } # File not found is the only expected absence.
 }
-$owned = $null -eq $task -or $task.Definition.RegistrationInfo.Description -eq $marker
+$owned = $null -eq $task -or ($task.Definition.RegistrationInfo.Description -eq $marker `
+    -and (Resolve-UserSid $task.Definition.Principal.UserId) -eq $userSid)
 $matches = $owned -and (Test-TaskMatches $task)
 $changed = $false
 if ($Mode -ne 'Inspect' -and -not $owned) { throw 'An unrelated task already uses this name; it has not been changed.' }
