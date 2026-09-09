@@ -1,6 +1,11 @@
 # OmniRoute Session Sync
 
-Keep one OmniRoute API key in your application while this Chrome extension updates the credentials of your selected browser-session connections. OmniRoute handles model routing and fallback; the extension handles cookie changes.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests: 66 passed](https://img.shields.io/badge/Tests-66%20passed-brightgreen.svg)](tests/)
+
+Automated local cookie and session synchronization between Google Chrome and OmniRoute. Keep a single OmniRoute API key in your application while the extension updates credentials for your chosen browser-session connections when web cookies rotate.
+
+For an in-depth walkthrough of data flow, architecture, and step-by-step pairing, see the [Architecture and Operator Guide](GUIDE.md).
 
 Version 2 replaces direct database writes with OmniRoute's authenticated management API. Each browser provider maps to **one connection you choose**. Other accounts are left alone.
 
@@ -142,3 +147,7 @@ The original audit in `audit/AUDIT.md` documents the pre-v2 implementation. Its 
 For the synthetic popup check, start `node scripts/popup-fixture.mjs` from the repository root, then run `scripts/popup-smoke.js` with Playwright MCP's `browser_run_code_unsafe` filename argument. Use the repository root as Playwright's working directory. The fixture serves only popup assets on port 20139, creates the ignored `artifacts` directory, and uses the fake pairing code `FIXTURE-123`. It never connects to the real bridge or reads browser sessions.
 
 See [the v2 verification report](audit/V2-VERIFICATION.md) for the recorded test results, live gateway check, and remaining runtime checks.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE). Copyright (c) 2026 Avichal Goyal.
