@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { OmniClient } from '../bridge/omniClient.mjs';
 
-async function fixture(t,handler,cloudEnabled=false){
+async function fixture(t,handler,settings={cloudEnabled:false}){
   const server=http.createServer((req,res)=>{
-    if(req.url==='/api/settings'){res.setHeader('Content-Type','application/json');return res.end(JSON.stringify({cloudEnabled}));}
+    if(req.url==='/api/settings'){res.setHeader('Content-Type','application/json');return res.end(JSON.stringify(settings));}
     return handler(req,res);
   });await new Promise(r=>server.listen(0,'127.0.0.1',r));
   t.after(()=>{server.closeAllConnections();server.close()});
@@ -46,7 +46,33 @@ test('catalog uses configured active browser providers and fallback does not rep
   await assert.rejects(client.saveFallback(['chatgpt-web/model'],{}),/already exists/i);
 });
 test('local-only gateway refuses credential updates when cloud sync is enabled',async t=>{
-  let writes=0;const client=await fixture(t,(_req,res)=>{writes++;res.end('{}')},true);
+  let writes=0;const client=await fixture(t,(_req,res)=>{writes++;res.end('{}')},{cloudEnabled:true});
   await assert.rejects(client.updateCredential('a','synthetic-session'),/cloud sync/i);
   assert.equal(writes,0);
+});
+
+test('local-only credential updates require an explicit disabled cloud setting',async t=>{
+  for(const settings of [{},null,[],{cloudEnabled:'false'},{cloudEnabled:0},{cloud_enabled:false}]){
+    let writes=0;const client=await fixture(t,(_req,res)=>{writes++;res.end('{}')},settings);
+    await assert.rejects(client.updateCredential('a','synthetic-session'),error=>error.code==='CLOUD_SYNC_ENABLED');
+    assert.equal(writes,0);
+  }
+});
+
+test('candidate management headers apply to validation without replacing configured credentials',async t=>{
+  const authorization=[];const client=await fixture(t,(req,res)=>{
+    authorization.push(req.headers.authorization);res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({connections:[]}));
+  });
+  await client.listConnections({headers:{Authorization:'Bearer synthetic-candidate-management'}});
+  await client.listConnections();
+  assert.deepEqual(authorization,['Bearer synthetic-candidate-management','Bearer synthetic-management']);
+});
+
+test('session validation cannot trigger upstream writes with enabled or unknown cloud sync',async t=>{
+  for(const settings of [{cloudEnabled:true},{},null,{cloudEnabled:'false'}]){
+    let tests=0;const client=await fixture(t,(_req,res)=>{tests++;res.end('{"valid":true}')},settings);
+    await assert.rejects(client.testConnection('a'),error=>error.code==='CLOUD_SYNC_ENABLED');
+    assert.equal(tests,0);
+  }
 });

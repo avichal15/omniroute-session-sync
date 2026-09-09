@@ -3,7 +3,7 @@ import path from 'node:path';
 import { dataDirectory } from '../bridge/runtimeState.mjs';
 
 export async function localRequest(endpoint, body) {
-  const config = JSON.parse(await fs.readFile(new URL('../bridge/config.json', import.meta.url), 'utf8'));
+  const config = JSON.parse(await fs.readFile(process.env.OMNI_SYNC_CONFIG_FILE || new URL('../bridge/config.json', import.meta.url), 'utf8'));
   let state;
   try { state = JSON.parse(await fs.readFile(path.join(dataDirectory(), 'state.json'), 'utf8')); }
   catch { throw new Error('Start the bridge first with npm start.'); }

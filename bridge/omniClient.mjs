@@ -15,10 +15,10 @@ export class OmniClient {
     this.baseUrl = loopbackUrl(baseUrl); this.headers = headers; this.timeoutMs = timeoutMs; this.catalog = null;
     this.allowCloudSync = allowCloudSync;
   }
-  async request(endpoint, { method = 'GET', body, timeoutMs = this.timeoutMs } = {}) {
+  async request(endpoint, { method = 'GET', body, timeoutMs = this.timeoutMs, headers } = {}) {
     try {
       const response = await fetch(this.baseUrl + endpoint, {
-        method, headers: { ...(await this.headers()), Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+        method, headers: { ...(headers ?? await this.headers()), Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         body: body === undefined ? undefined : JSON.stringify(body),
         redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
       });
@@ -41,8 +41,8 @@ export class OmniClient {
       throw new BridgeError('GATEWAY_UNAVAILABLE', 'OmniRoute is unavailable or timed out', 503);
     }
   }
-  async listConnections() {
-    const result = await this.request('/api/providers');
+  async listConnections(options) {
+    const result = await this.request('/api/providers', options);
     if (!Array.isArray(result.connections)) throw new BridgeError('GATEWAY_INVALID_RESPONSE', 'Unexpected OmniRoute connection response', 502);
     return result.connections.filter(row => Object.hasOwn(PROVIDERS, row.provider)).map(row => ({
       id: row.id, provider: row.provider, name: String(row.name || row.displayName || row.provider).slice(0, 200),
@@ -52,14 +52,11 @@ export class OmniClient {
   async checkSyncDestination() {
     if (this.allowCloudSync) return;
     const settings = await this.request('/api/settings');
-    if (settings.cloudEnabled !== false)
+    if (settings?.cloudEnabled !== false)
       throw new BridgeError('CLOUD_SYNC_ENABLED', 'Disable OmniRoute cloud sync before saving browser sessions with this local-only bridge', 409);
   }
   async updateCredential(id, cookie) {
-    const settings = await this.request('/api/settings');
-    if (settings && (settings.cloudEnabled === true || settings.cloud_enabled === true)) {
-      throw new BridgeError('CLOUD_SYNC_ENABLED', 'Local-only gateway refuses credential updates when cloud sync is enabled', 409);
-    }
+    await this.checkSyncDestination();
     const result = await this.request(`/api/providers/${encodeURIComponent(id)}`, { method: 'PUT', body: {
       apiKey: cookie, testStatus: 'unknown', lastError: null, lastErrorAt: null, lastErrorType: null, lastErrorSource: null, errorCode: null,
     } });
@@ -68,6 +65,7 @@ export class OmniClient {
     return { success: true };
   }
   async testConnection(id) {
+    await this.checkSyncDestination();
     const result = await this.request(`/api/providers/${encodeURIComponent(id)}/test`, { method: 'POST', body: {}, timeoutMs: 22000 });
     return { valid: result.valid === true, unsupported: result.unsupported, diagnosis: result.diagnosis, error: result.error };
   }

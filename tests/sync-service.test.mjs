@@ -41,3 +41,56 @@ test('fallback rejects models outside the currently available browser-provider c
   const f=fixture();await assert.rejects(f.service.saveFallback(['openai/paid-model']),/available/i);
   await f.service.saveFallback(['chatgpt-web/model-a']);assert.equal(f.state.fallback.saved,true);
 });
+
+test('structured upstream auth failures request login without claiming a validation time',async()=>{
+  const f=fixture();await f.service.sync(payload(1));
+  f.gateway.testConnection=async()=>({valid:false,error:'Access denied',diagnosis:{type:'upstream_auth_error',code:'403'}});
+  const result=await f.service.validate('chatgpt-web');
+  assert.equal(result.phase,'login-required');
+  assert.equal(f.state.statuses['chatgpt-web'].lastValidatedAt,undefined);
+});
+
+test('failed or unsupported tests preserve the last successful validation timestamp',async()=>{
+  const f=fixture();await f.service.sync(payload(1));await f.service.validate('chatgpt-web');
+  assert.ok(f.state.statuses['chatgpt-web'].lastValidatedAt);
+  const lastSuccess='2026-01-01T00:00:00.000Z';
+  f.state.statuses['chatgpt-web'].lastValidatedAt=lastSuccess;
+  for(const diagnosis of [{type:'upstream_rate_limited',code:'429'},{type:'unsupported',code:'unsupported'}]){
+    f.gateway.testConnection=async()=>({valid:false,diagnosis});
+    const result=await f.service.validate('chatgpt-web');
+    assert.equal(result.phase,diagnosis.type==='unsupported'?'synced':'error');
+    assert.equal(f.state.statuses['chatgpt-web'].lastValidatedAt,lastSuccess);
+  }
+});
+
+test('a failed mapping commit cannot contaminate a concurrent successful provider commit',async()=>{
+  const state={mappings:{},statuses:{}};let disk=structuredClone(state);let tail=Promise.resolve();let saves=0;
+  let entered;const firstStarted=new Promise(resolve=>{entered=resolve});
+  let fail;const firstSave=new Promise((_,reject)=>{fail=reject});
+  const persist=(candidate=state)=>{
+    const snapshot=structuredClone(candidate);
+    tail=tail.catch(()=>{}).then(async()=>{if(++saves===1){entered();await firstSave}disk=snapshot});
+    return tail;
+  };
+  const gateway={listConnections:async()=>[
+    {id:'chat',provider:'chatgpt-web',isActive:true,authType:'apikey'},
+    {id:'gemini',provider:'gemini-web',isActive:true,authType:'apikey'}]};
+  const service=new SyncService({state,gateway,persist});
+  const failed=assert.rejects(service.setMapping('chatgpt-web','chat'),/storage unavailable/);
+  await firstStarted;const succeeding=service.setMapping('gemini-web','gemini');
+  await new Promise(resolve=>setImmediate(resolve));fail(new Error('storage unavailable'));
+  await failed;assert.equal((await succeeding).success,true);
+  assert.deepEqual(state.mappings,{'gemini-web':'gemini'});
+  assert.deepEqual(state.statuses,{'gemini-web':{phase:'pending'}});
+  assert.deepEqual(disk,state);
+});
+
+test('failed sync, validation and fallback commits leave the acknowledged state unchanged',async()=>{
+  for(const operation of ['sync','validate','fallback']){
+    const f=fixture();await f.service.sync(payload(1));const previous=structuredClone(f.state);
+    f.service.persist=async()=>{throw new Error('storage unavailable')};
+    const request=operation==='sync'?f.service.sync(payload(2,'rotated-session'))
+      :operation==='validate'?f.service.validate('chatgpt-web'):f.service.saveFallback(['chatgpt-web/model-a']);
+    await assert.rejects(request,/storage unavailable/);assert.deepEqual(f.state,previous,operation);
+  }
+});

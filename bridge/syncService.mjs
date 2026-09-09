@@ -5,6 +5,7 @@ import { BridgeError } from './errors.mjs';
 export class SyncService {
   constructor({ gateway, state, persist }) {
     this.gateway = gateway; this.state = state; this.persist = persist; this.queues = new Map();
+    this.commits = Promise.resolve();
     state.mappings ??= {}; state.statuses ??= {};
     state.fallback ??= { name: 'browser-sessions', models: [], saved: false };
   }
@@ -12,6 +13,17 @@ export class SyncService {
     const pending = (this.queues.get(provider) || Promise.resolve()).catch(() => {}).then(operation);
     this.queues.set(provider, pending);
     pending.finally(() => { if (this.queues.get(provider) === pending) this.queues.delete(provider); }).catch(() => {});
+    return pending;
+  }
+  commit(update) {
+    // Build from the last successful snapshot; network work stays outside this queue.
+    const pending = this.commits.then(async () => {
+      const candidate = update(this.state);
+      await this.persist(candidate);
+      Object.assign(this.state, candidate);
+      return candidate;
+    });
+    this.commits = pending.catch(() => {});
     return pending;
   }
   checkProvider(provider) {
@@ -30,11 +42,13 @@ export class SyncService {
     return this.serial(provider, async () => {
       if (connectionId !== null) await this.connection(provider, connectionId);
       if (connectionId === this.state.mappings[provider]) return { success: true };
-      const mappings = { ...this.state.mappings }; const statuses = { ...this.state.statuses };
-      if (connectionId === null) delete this.state.mappings[provider];
-      else this.state.mappings[provider] = connectionId;
-      this.state.statuses[provider] = { phase: connectionId ? 'pending' : 'unmapped' };
-      try { await this.persist(); } catch (error) { this.state.mappings = mappings; this.state.statuses = statuses; throw error; }
+      await this.commit(current => {
+        const mappings = { ...current.mappings };
+        if (connectionId === null) delete mappings[provider];
+        else mappings[provider] = connectionId;
+        return { ...current, mappings, statuses: { ...current.statuses,
+          [provider]: { phase: connectionId ? 'pending' : 'unmapped' } } };
+      });
       return { success: true };
     });
   }
@@ -54,12 +68,12 @@ export class SyncService {
         throw new BridgeError('REVISION_CONFLICT', 'Session revision was reused with different credentials', 409);
       const unchanged = previous?.fingerprint === fingerprint && !force;
       if (!unchanged) await this.gateway.updateCredential(connectionId, cookie);
-      this.state.statuses[provider] = unchanged ? { ...previous, revision } : {
+      const status = unchanged ? { ...previous, revision } : {
         phase: 'synced', connectionId, fingerprint, revision, lastSyncedAt: new Date().toISOString(),
         message: 'Saved to OmniRoute; session validation is separate',
       };
-      try { await this.persist(); } catch (error) { this.state.statuses[provider] = previous; throw error; }
-      return { success: true, skipped: unchanged, revision, phase: this.state.statuses[provider].phase };
+      await this.commit(current => ({ ...current, statuses: { ...current.statuses, [provider]: status } }));
+      return { success: true, skipped: unchanged, revision, phase: status.phase };
     });
   }
   validate(provider) {
@@ -70,17 +84,20 @@ export class SyncService {
       await this.connection(provider, id);
       const result = await this.gateway.testConnection(id);
       const previous = this.state.statuses[provider] || {};
-      const unsupported = result.unsupported || result.diagnosis?.unsupported || /not supported|unsupported/i.test(result.error || '');
-      const loginRequired = /SESSION_EXPIRED|AUTH_007|401|login|sign.in|expired|invalid.*token/i.test(result.error || '')
+      const unsupported = result.unsupported || result.diagnosis?.unsupported || result.diagnosis?.type === 'unsupported'
+        || /not supported|unsupported/i.test(result.error || '');
+      const loginRequired = ['upstream_auth_error', 'token_refresh_failed', 'token_expired'].includes(result.diagnosis?.type)
+        || ['401', '403', 'SESSION_EXPIRED', 'AUTH_007'].includes(String(result.diagnosis?.code || ''))
+        || /SESSION_EXPIRED|AUTH_007|401|login|sign.in|expired|invalid.*token/i.test(result.error || '')
         || result.diagnosis?.category === 'auth';
       const phase = result.valid === true ? 'validated' : unsupported ? 'synced' : loginRequired ? 'login-required' : 'error';
-      this.state.statuses[provider] = { ...previous, phase, lastValidatedAt: new Date().toISOString(),
+      const status = { ...previous, phase, ...(result.valid === true ? { lastValidatedAt: new Date().toISOString() } : {}),
         message: result.valid === true ? 'OmniRoute accepted the session test'
           : unsupported ? 'Saved; this provider has no reliable session test'
           : loginRequired ? 'Sign in to the provider in Chrome, then sync again'
           : 'OmniRoute could not validate the session; check the provider dashboard' };
-      await this.persist();
-      return { success: true, valid: result.valid === true, phase };
+      await this.commit(current => ({ ...current, statuses: { ...current.statuses, [provider]: status } }));
+      return { success: true, valid: result.valid === true, phase, message: status.message };
     });
   }
   async status() {
@@ -100,9 +117,9 @@ export class SyncService {
       if (models.some(id => !available.some(m => m.id === id && Object.hasOwn(PROVIDERS, m.provider))))
         throw new BridgeError('MODEL_NOT_ALLOWED', 'Only available browser-provider models may be used');
       const result = await this.gateway.saveFallback(models, this.state.fallback);
-      this.state.fallback = { name: 'browser-sessions', id: result.id, models, saved: true };
-      await this.persist();
-      return { success: true, fallback: this.state.fallback };
+      const fallback = { name: 'browser-sessions', id: result.id, models: [...models], saved: true };
+      await this.commit(current => ({ ...current, fallback }));
+      return { success: true, fallback };
     });
   }
 }

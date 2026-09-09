@@ -8,7 +8,8 @@ const fault = (code, message) => Object.assign(new Error(message), { code });
 
 function safeError(error, secret = '') {
   let message = typeof error?.message === 'string' ? error.message : 'The local bridge request failed.';
-  const fragments = [secret, ...secret.split(';').map(part => part.slice(part.indexOf('=') + 1).trim())];
+  if (secret) message = message.split(secret).join('[redacted]');
+  const fragments = secret.split(';').map(part => part.slice(part.indexOf('=') + 1).trim());
   for (const fragment of fragments) if (fragment.length >= 4) message = message.split(fragment).join('[redacted]');
   return {
     code: typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : 'REQUEST_FAILED',
@@ -22,6 +23,7 @@ async function sha256(value) {
 }
 
 function restoredEntry(value = {}) {
+  if (!value || typeof value !== 'object') value = {};
   const ack = value.ack && /^[a-f0-9]{64}$/.test(value.ack.fingerprint)
     && typeof value.ack.connectionId === 'string' && value.ack.connectionId
     && positiveInteger(value.ack.revision)
@@ -55,6 +57,7 @@ export function createSyncCoordinator({
     const previous = saved?.[COORDINATOR_STORAGE_KEY]?.providers;
     for (const id of ids) entries[id] = restoredEntry(previous?.[id]);
   })();
+  void ready.catch(() => {});
 
   function checkProvider(provider) {
     if (!Object.hasOwn(PROVIDERS, provider)) throw fault('UNSUPPORTED_PROVIDER', 'Choose a supported browser provider.');
@@ -92,7 +95,7 @@ export function createSyncCoordinator({
   }
 
   function canceled(provider) {
-    return { provider, success: false, attempted: false, skipped: true, phase: 'pending',
+    return { provider, success: false, attempted: false, skipped: false, phase: 'pending',
       error: { code: 'PAIRING_CHANGED', message: 'Pairing changed. This provider will be reconciled again.' } };
   }
 
@@ -108,7 +111,8 @@ export function createSyncCoordinator({
       await persist();
       const row = await neededRow(provider);
       if (local.epoch !== epoch) return canceled(provider);
-      if (!row?.connectionId) {
+      if (!row) throw fault('STATUS_UNAVAILABLE', 'This provider status is unavailable. Pending sync will retry when the gateway is ready.');
+      if (!row.connectionId) {
         entry.pending = local.version !== version;
         entry.phase = 'unmapped';
         entry.message = 'Choose an active OmniRoute connection.';
@@ -282,6 +286,7 @@ export function createSyncCoordinator({
       const local = runtime.get(provider);
       const epoch = local.epoch;
       const version = local.version;
+      const wasPending = entry.pending;
       try {
         const row = await neededRow(provider);
         if (!activeMapping(row)) throw fault('INVALID_MAPPING', 'Choose an active browser connection before testing.');
@@ -291,13 +296,25 @@ export function createSyncCoordinator({
         const result = await bridge('/api/validate', { method: 'POST', body: { provider } });
         if (local.epoch !== epoch) return canceled(provider);
         const valid = result.valid === true;
-        entry.pending = local.version !== version;
-        entry.phase = entry.pending ? 'pending' : valid ? 'validated' : 'login-required';
-        entry.message = valid ? 'The connection test passed.' : 'The connection test failed. Sign in again, then sync and test.';
+        const completedPhase = valid ? 'validated' : PHASES.has(result.phase) && result.phase !== 'validated' ? result.phase : 'error';
+        const defaults = {
+          validated: 'The connection test passed.',
+          synced: 'This provider does not support a connection test. The session remains synced.',
+          'login-required': 'The session is no longer valid. Sign in again, then sync and test.',
+          error: 'The connection test could not be completed. Try testing again.'
+        };
+        const suppliedMessage = typeof result.message === 'string' && result.message.trim()
+          ? result.message : result.error?.message;
+        entry.pending = wasPending || local.version !== version;
+        entry.phase = local.version !== version ? 'pending' : completedPhase;
+        entry.message = safeError({ message: suppliedMessage || defaults[completedPhase] || 'The connection test did not validate this session.' }).message;
         if (valid) entry.lastValidatedAt = new Date(now()).toISOString();
         await persist();
         return { success: valid, valid, phase: entry.phase,
-          ...(!valid ? { error: { code: 'VALIDATION_FAILED', message: entry.message } } : {}) };
+          ...(!valid ? { error: {
+            code: completedPhase === 'synced' ? 'VALIDATION_UNSUPPORTED' : completedPhase === 'login-required' ? 'LOGIN_REQUIRED' : 'VALIDATION_FAILED',
+            message: entry.message
+          } } : {}) };
       } catch (error) {
         if (local.epoch !== epoch) return canceled(provider);
         const safe = safeError(error);

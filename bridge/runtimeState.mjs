@@ -31,8 +31,8 @@ export async function loadState(directory = dataDirectory()) {
   if (state.version !== 2 || typeof state.ownerToken !== 'string' || state.ownerToken.length < 32)
     throw new BridgeError('STATE_INVALID', 'Unsupported bridge state file', 500);
   let writeQueue = Promise.resolve();
-  const persist = () => {
-    const snapshot = JSON.stringify(state, null, 2);
+  const persist = (candidate = state) => {
+    const snapshot = JSON.stringify(candidate, null, 2);
     writeQueue = writeQueue.catch(() => {}).then(async () => {
       const temporary = filename + '.tmp';
       await fs.writeFile(temporary, snapshot, { mode: 0o600 });

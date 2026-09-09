@@ -8,6 +8,7 @@ const PHASE_LABELS = {
   unmapped: 'Not mapped', pending: 'Pending', synced: 'Synced',
   validated: 'Validated', 'login-required': 'Sign-in required', error: 'Error'
 };
+const RELOAD_WORKER_MESSAGE = 'Chrome is running an incompatible background worker. Open chrome://extensions, click Reload on OmniRoute Session Sync, then reopen this popup. If it persists, check that Chrome loaded the updated extension folder.';
 
 document.addEventListener('DOMContentLoaded', () => {
   const ui = Object.fromEntries([
@@ -17,7 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
     'saveFallbackBtn', 'fallbackFeedback', 'actionFeedback', 'refreshBtn'
   ].map(id => [id, document.getElementById(id)]));
   const state = {
-    status: null, available: false, refreshing: false, requestId: 0,
+    status: null, available: false, refreshing: false, requestId: 0, needsReload: false,
     pairing: false, syncingAll: false, savingFallback: false,
     providers: new Map(), busy: new Map(), views: new Map(), models: new Map(),
     fallback: [], fallbackDirty: false, fallbackLoaded: false
@@ -66,6 +67,11 @@ document.addEventListener('DOMContentLoaded', () => {
           clearTimeout(timeout);
           const error = chrome.runtime.lastError;
           if (error) reject(new Error(messageOf(error)));
+          else if ((!response?.success && (/^unknown action[.!]?$/i.test(messageOf(response?.error).trim()) || response?.error?.code === 'UNKNOWN_ACTION'))
+              || (payload.action === 'GET_STATUS' && response?.success && (typeof response.paired !== 'boolean'
+                || typeof response.bridge?.ready !== 'boolean' || !Array.isArray(response.providers)))) {
+            reject(Object.assign(new Error(RELOAD_WORKER_MESSAGE), { code: 'EXTENSION_RELOAD_REQUIRED' }));
+          }
           else if (!response?.success) reject(new Error(messageOf(response?.error, 'The extension could not complete the request.')));
           else resolve(response);
         });
@@ -295,7 +301,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const syncable = [...state.providers.values()].some(provider => provider.hasCredentials && usable(mappedConnection(provider)) && provider.phase !== 'pending');
     ui.syncAllBtn.disabled = !ready || busy || hasDrafts || !syncable;
     text(ui.syncAllBtn, state.syncingAll ? 'Syncing…' : 'Sync all');
-    ui.pairBtn.disabled = state.pairing || !ui.pairCode.value.trim();
+    ui.pairBtn.disabled = state.pairing || state.needsReload || !ui.pairCode.value.trim();
     ui.pairCode.disabled = state.pairing;
     text(ui.pairBtn, state.pairing ? 'Pairing…' : 'Pair browser');
     ui.refreshBtn.disabled = state.refreshing;
@@ -315,6 +321,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function acceptStatus(status) {
     state.status = status;
     state.available = true;
+    state.needsReload = false;
     const paired = status.paired === true;
     ui.pairingSection.hidden = paired;
     ui.pairedContent.hidden = !paired;
@@ -348,7 +355,8 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch (error) {
       if (requestId !== state.requestId) return;
       state.available = false;
-      text(ui.bridgeStatusBadge, 'Status unavailable');
+      state.needsReload = error.code === 'EXTENSION_RELOAD_REQUIRED';
+      text(ui.bridgeStatusBadge, state.needsReload ? 'Reload extension' : 'Status unavailable');
       ui.bridgeStatusBadge.dataset.state = 'error';
       feedback(ui.statusNotice, messageOf(error, 'Unable to read extension status. Try Refresh.'), 'error');
       if (!state.status) ui.pairingSection.hidden = false;
@@ -362,7 +370,7 @@ document.addEventListener('DOMContentLoaded', () => {
   ui.pairForm.addEventListener('submit', async event => {
     event.preventDefault();
     const code = ui.pairCode.value.trim();
-    if (state.pairing || !code) return;
+    if (state.pairing || state.needsReload || !code) return;
     state.pairing = true;
     renderControls();
     feedback(ui.pairFeedback, 'Pairing with the local bridge…', 'pending');
@@ -373,6 +381,7 @@ document.addEventListener('DOMContentLoaded', () => {
       feedback(ui.actionFeedback, 'Browser paired. Choose your provider connections below.', 'success');
       await refreshStatus(true);
     } catch (error) {
+      if (error.code === 'EXTENSION_RELOAD_REQUIRED') state.needsReload = true;
       feedback(ui.pairFeedback, messageOf(error), 'error');
     } finally {
       state.pairing = false;

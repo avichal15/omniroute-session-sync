@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { createSyncCoordinator, COORDINATOR_STORAGE_KEY } from '../extension/lib/syncCoordinator.js';
 
 const CHAT = 'chatgpt-web';
@@ -39,6 +40,8 @@ function fixture() {
   let active = 0;
   let maxActive = 0;
   let validation = true;
+  let validationPhase = '';
+  let validationMessage = '';
   let storageFailure = false;
   let stale = false;
   const storage = {
@@ -57,7 +60,8 @@ function fixture() {
       rows.get(body.provider).phase = 'unmapped';
       return { success: true };
     }
-    if (path === '/api/validate') return { success: true, valid: validation, phase: validation ? 'validated' : 'login-required' };
+    if (path === '/api/validate') return { success: true, valid: validation,
+      phase: validationPhase || (validation ? 'validated' : 'login-required'), message: validationMessage };
     assert.equal(path, '/api/sync');
     writes.push(copy(body));
     active++;
@@ -98,6 +102,7 @@ function fixture() {
     hold: value => { holdWrite = value; },
     rejectStorage: value => { storageFailure = value; },
     rejectValidation: () => { validation = false; },
+    validationResult: (phase, message) => { validation = false; validationPhase = phase; validationMessage = message; },
     staleNext: () => { stale = true; },
     maxActive: () => maxActive,
     advance(ms) {
@@ -174,6 +179,22 @@ test('worker restart recovers durable pending work and reads fresh credentials',
   assert.equal(f.writes.find(write => write.provider === CHAT).cookie, 'session-after-restart');
   assert.equal(f.data[COORDINATOR_STORAGE_KEY].providers[CHAT].pending, false);
   assert.equal(JSON.stringify(f.data).includes('session-after-restart'), false);
+  restarted.dispose();
+});
+
+test('acknowledgments survive restart but an unavailable gateway row keeps retry state', async () => {
+  const f = fixture();
+  const first = f.coordinator();
+  await first.syncProvider(CHAT);
+  first.dispose();
+  const restarted = f.coordinator();
+  assert.equal((await restarted.syncProvider(CHAT)).skipped, true);
+  assert.equal(f.writes.length, 1);
+  f.rows.delete(CHAT);
+  const result = await restarted.syncProvider(CHAT);
+  assert.equal(result.success, false);
+  assert.equal(f.data[COORDINATOR_STORAGE_KEY].providers[CHAT].pending, true);
+  assert.equal(f.data[COORDINATOR_STORAGE_KEY].providers[CHAT].ack.fingerprint, fingerprint('chat-session-one'));
   restarted.dispose();
 });
 
@@ -292,4 +313,129 @@ test('a completed validation with valid false is a failure for the popup', async
   assert.equal(result.phase, 'login-required');
   assert.equal((await sync.getLocalStatus())[CHAT].phase, 'login-required');
   sync.dispose();
+});
+
+test('unsupported validation preserves synced status without claiming validation or requiring login', async () => {
+  const f = fixture();
+  const sync = f.coordinator();
+  f.validationResult('synced', 'This provider does not support a connection test.');
+  const result = await sync.validateProvider(CHAT);
+  assert.equal(result.success, false);
+  assert.equal(result.valid, false);
+  assert.equal(result.phase, 'synced');
+  assert.equal(result.error.message, 'This provider does not support a connection test.');
+  assert.equal((await sync.getLocalStatus())[CHAT].phase, 'synced');
+  sync.dispose();
+});
+
+test('transient validation failure preserves error status and its retry message', async () => {
+  const f = fixture();
+  const sync = f.coordinator();
+  f.validationResult('error', 'Provider timed out. Try testing again.');
+  const result = await sync.validateProvider(CHAT);
+  assert.equal(result.success, false);
+  assert.equal(result.phase, 'error');
+  assert.equal(result.error.message, 'Provider timed out. Try testing again.');
+  const status = (await sync.getLocalStatus())[CHAT];
+  assert.equal(status.phase, 'error');
+  assert.equal(status.message, 'Provider timed out. Try testing again.');
+  sync.dispose();
+});
+
+test('worker popup contract stays secret-free, retains offline mappings, and reports validation failures', () => {
+  const workerUrl = new URL('../extension/background.js', import.meta.url).href;
+  // A separate process guarantees every fetch and cookie read stays inside this fixture.
+  const script = `
+    import assert from 'node:assert/strict';
+    const stored = {};
+    const listeners = {};
+    const calls = [];
+    let accessLevel;
+    let token = '';
+    let offline = false;
+    let expired = false;
+    let rejectWrite = false;
+    let validation = false;
+    let rows = [];
+    let fallback = { name: 'browser-sessions', models: [], saved: false };
+    const event = name => ({ addListener(callback) { listeners[name] = callback; } });
+    globalThis.chrome = {
+      storage: { local: {
+        async get(keys) { return Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(key => [key, structuredClone(stored[key])])); },
+        async set(value) { Object.assign(stored, structuredClone(value)); },
+        async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key]; },
+        async setAccessLevel(value) { accessLevel = value.accessLevel; }
+      } },
+      runtime: { id: 'fixture-extension', onMessage: event('message'), onStartup: event('startup'), onInstalled: event('installed') },
+      cookies: {
+        async getAll({ url }) { return url.includes('chatgpt.com') ? [{ name: '__Secure-next-auth.session-token', value: 'synthetic-cookie-only' }] : []; },
+        onChanged: event('cookie')
+      },
+      alarms: { async get() {}, async create() {}, async clear() {}, onAlarm: event('alarm') }
+    };
+    globalThis.fetch = async (url, options = {}) => {
+      assert.ok(url.startsWith('http://127.0.0.1:20129/'));
+      const path = new URL(url).pathname;
+      const body = options.body ? JSON.parse(options.body) : null;
+      calls.push({ path, body });
+      const reply = (value, status = 200) => new Response(JSON.stringify(value), { status });
+      if (path === '/health') return reply({ service: 'omniroute-session-sync', version: '2.0.0', ready: true, paired: Boolean(token) });
+      if (path === '/api/pair') { assert.equal(body.code, 'once'); token = 'synthetic-private-pairing-token'; rows = []; return reply({ success: true, token }); }
+      assert.equal(options.headers.Authorization, 'Bearer ' + token);
+      if (expired) return reply({ success: false, error: { code: 'UNAUTHORIZED', message: 'Expired ' + token } }, 401);
+      if (path === '/api/needed') return reply({ success: true, providers: rows });
+      if (path === '/api/status') return reply({ success: true, paired: true, bridge: { ready: !offline, ...(offline ? { error: 'Offline' } : {}) },
+        providers: offline ? [] : rows,
+        models: offline ? [] : [{ id: 'chatgpt-web/model-one', provider: 'chatgpt-web', label: 'Browser model' }, { id: 'official-model', provider: 'openai', label: 'Official' }],
+        fallback: offline ? { name: 'browser-sessions', models: [], saved: false } : fallback });
+      if (path === '/api/sync') {
+        assert.equal(body.cookie, 'synthetic-cookie-only');
+        assert.equal(typeof body.force, 'boolean');
+        if (rejectWrite) return reply({ success: false, error: { code: 'WRITE_REJECTED', message: 'Write rejected' } }, 503);
+        rows[0].revision = body.revision;
+        rows[0].phase = 'synced';
+        return reply({ success: true, phase: 'synced', revision: body.revision });
+      }
+      if (path === '/api/validate') return reply({ success: true, valid: validation, phase: validation ? 'validated' : 'login-required' });
+      if (path === '/api/fallback') { fallback = { name: 'browser-sessions', models: body.models, saved: true }; return reply({ success: true }); }
+      assert.fail('Unexpected fixture request: ' + path);
+    };
+    await import(${JSON.stringify(workerUrl)});
+    const send = message => new Promise(resolve => assert.equal(listeners.message(message, { id: 'fixture-extension' }, resolve), true));
+    let status = await send({ action: 'GET_STATUS' });
+    assert.equal(accessLevel, 'TRUSTED_CONTEXTS');
+    assert.equal(status.paired, false);
+    assert.equal(status.providers.length, 6);
+    assert.equal(JSON.stringify(status).includes('synthetic-cookie-only'), false);
+    assert.deepEqual(await send({ action: 'PAIR', code: 'once' }), { success: true });
+    for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+    rows = [{ provider: 'chatgpt-web', connectionId: 'mapped', revision: 0, phase: 'unmapped', connections: [{ id: 'mapped', name: 'Profile', isActive: true, authType: 'apikey' }] }];
+    status = await send({ action: 'GET_STATUS' });
+    assert.equal(status.models.length, 1);
+    assert.equal((await send({ action: 'SYNC_ONE', provider: 'chatgpt-web' })).success, true);
+    assert.equal((await send({ action: 'VALIDATE_PROVIDER', provider: 'chatgpt-web' })).success, false);
+    status = await send({ action: 'GET_STATUS' });
+    assert.equal(status.providers[0].phase, 'login-required');
+    assert.equal(JSON.stringify(status).includes('synthetic-cookie-only'), false);
+    assert.equal(JSON.stringify(status).includes(token), false);
+    assert.equal(JSON.stringify(stored.sessionSyncCoordinatorV2).includes('synthetic-cookie-only'), false);
+    rejectWrite = true;
+    assert.equal((await send({ action: 'SYNC_ALL' })).success, false);
+    rejectWrite = false;
+    assert.equal((await send({ action: 'SAVE_FALLBACK', models: ['official-model'] })).success, false);
+    assert.equal((await send({ action: 'SAVE_FALLBACK', models: ['chatgpt-web/model-one'] })).success, true);
+    offline = true;
+    status = await send({ action: 'GET_STATUS' });
+    assert.equal(status.bridge.ready, false);
+    assert.equal(status.providers[0].connectionId, 'mapped');
+    assert.equal(status.models.length, 1);
+    assert.equal(status.fallback.saved, true);
+    expired = true;
+    status = await send({ action: 'GET_STATUS' });
+    assert.equal(status.paired, false);
+    assert.equal(JSON.stringify(status).includes(token), false);
+    assert.equal(stored.sessionSyncPairingV2, undefined);
+    console.log('Worker fixture passed');
+  `;
+  assert.match(execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 10000 }), /Worker fixture passed/);
 });

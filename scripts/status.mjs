@@ -2,6 +2,7 @@ import { localRequest } from './bridge-client.mjs';
 try {
   const result = await localRequest('/api/status');
   console.log(`OmniRoute: ${result.bridge.ready ? 'ready' : result.bridge.error || 'unavailable'}`);
+  console.log(`Sync service: ${result.runtime?.lifecycle === 'omniroute' ? 'embedded in OmniRoute; starts with the gateway' : 'standalone'}`);
   console.log(`Chrome: ${result.paired ? 'paired' : 'not paired'}`);
   for (const p of result.providers) console.log(`${p.name}: ${p.phase}; connection ${p.connectionId || 'not selected'}; last saved ${p.lastSyncedAt || 'never'}`);
   console.log(`Fallback alias: ${result.fallback.saved ? result.fallback.name : 'not configured'}`);

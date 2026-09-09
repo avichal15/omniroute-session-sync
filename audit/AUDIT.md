@@ -1,5 +1,7 @@
 # OmniRoute Session Sync audit
 
+> Historical audit of the pre-v2 implementation. Session Sync v2 replaces the affected bridge and worker; the file locations and reproduction script below describe the original snapshot. Use `npm test` for the current isolated regression suite and see the README for current setup and limits.
+
 Audited 8 September 2026. Scope: all application source, extension assets, configuration, launch scripts, and the test script in `C:\omni`. This directory is not a Git repository, so this is an audit of the current files rather than a commit comparison.
 
 **Verdict: address the credential-write and test-isolation problems before relying on unattended sync.** There are three P1 findings and nine P2 findings below. P1 means high priority because ordinary use or an unauthorized request can replace credentials. P2 means a concrete reliability, configuration, or deployment defect that should be fixed next.
