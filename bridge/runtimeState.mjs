@@ -7,8 +7,12 @@ import { promisify } from 'node:util';
 import { BridgeError } from './errors.mjs';
 
 const exec = promisify(execFile);
-export function dataDirectory() {
-  return process.env.OMNI_SYNC_DATA_DIR || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'OmniRouteSessionSync');
+export function dataDirectory({ env = process.env, platform = process.platform, home = os.homedir() } = {}) {
+  if (env.OMNI_SYNC_DATA_DIR) return env.OMNI_SYNC_DATA_DIR;
+  // Packaged Windows apps can redirect AppData into a private LocalCache. A
+  // sign-in task outside that app cannot see those files even at the same path.
+  if (platform === 'win32') return path.win32.join(home, '.omniroute', 'session-sync');
+  return path.join(env.LOCALAPPDATA || path.join(home, '.local', 'share'), 'OmniRouteSessionSync');
 }
 export async function secureDirectory(directory) {
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });

@@ -3,7 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { loadState } from '../bridge/runtimeState.mjs';
+import { loadState, dataDirectory } from '../bridge/runtimeState.mjs';
+
+test('Windows startup and packaged apps share one state location outside redirected AppData', () => {
+  const home = 'C:\\Users\\Example';
+  const ordinary = dataDirectory({ platform: 'win32', home, env: { LOCALAPPDATA: home + '\\AppData\\Local' } });
+  const packaged = dataDirectory({ platform: 'win32', home, env: { LOCALAPPDATA: home + '\\AppData\\Local\\Packages\\Example\\LocalCache\\Local' } });
+  assert.equal(ordinary, 'C:\\Users\\Example\\.omniroute\\session-sync');
+  assert.equal(packaged, ordinary);
+  assert.equal(dataDirectory({ platform: 'win32', home, env: { OMNI_SYNC_DATA_DIR: 'C:\\explicit-sync-state' } }), 'C:\\explicit-sync-state');
+});
 
 async function temporaryState(t) {
   const root = path.resolve(os.tmpdir());
