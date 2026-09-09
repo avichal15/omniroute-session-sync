@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
-const omniRoot = 'C:/Users/avich/AppData/Roaming/npm/node_modules/omniroute';
+const omniRoot = process.env.OMNIROUTE_INSTALL_DIR || path.join(process.env.APPDATA || '', 'npm', 'node_modules', 'omniroute');
 const Database = require(`${omniRoot}/node_modules/better-sqlite3`);
 const syntheticSecret = '0123456789abcdef'.repeat(4);
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
