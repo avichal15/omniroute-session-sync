@@ -1,0 +1,16 @@
+{
+  "name": "omniroute-session-sync",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["bridge"],
+  "engines": { "node": ">=24.0.0 <27" },
+  "scripts": {
+    "start": "node bridge/server.mjs",
+    "test": "node scripts/test-sync.mjs",
+    "check": "node scripts/check.mjs",
+    "pair": "node scripts/pair.mjs",
+    "status": "node scripts/status.mjs",
+    "configure": "node scripts/configure-gateway.mjs"
+  }
+}

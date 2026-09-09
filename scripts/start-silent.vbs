@@ -1,2 +1,5 @@
 Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run "node.exe ""C:\omni\bridge\server.mjs""", 0, False
+Set FileSystem = CreateObject("Scripting.FileSystemObject")
+ProjectRoot = FileSystem.GetParentFolderName(FileSystem.GetParentFolderName(WScript.ScriptFullName))
+WshShell.CurrentDirectory = ProjectRoot
+WshShell.Run "node.exe """ & ProjectRoot & "\bridge\server.mjs""", 0, False

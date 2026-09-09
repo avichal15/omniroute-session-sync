@@ -1,195 +1,178 @@
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { initDb, getMonitoredProviders, updateProviderCookie } from './dbUpdater.mjs';
+import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { SyncService } from './syncService.mjs';
+import { OmniClient } from './omniClient.mjs';
+import { loadState } from './runtimeState.mjs';
+import { gatewayHeaders } from './gatewayAuth.mjs';
+import { BridgeError, publicError } from './errors.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const configPath = path.join(__dirname, 'config.json');
-const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-
-const logs = [];
-function addLog(level, message, data = {}) {
-  const entry = {
-    timestamp: new Date().toISOString(),
-    level,
-    message,
-    ...data
-  };
-  logs.unshift(entry);
-  if (logs.length > config.logLimit) logs.pop();
-  console.log(`[${entry.timestamp}] [${level.toUpperCase()}] ${message}`, Object.keys(data).length ? JSON.stringify(data) : '');
+const EXTENSION_ORIGIN = /^chrome-extension:\/\/[a-p]{32}$/;
+const MAX_BODY_BYTES = 512 * 1024;
+function sameSecret(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string' || left.length !== right.length) return false;
+  return timingSafeEqual(Buffer.from(left), Buffer.from(right));
 }
-
-// Initialize DB on startup
-try {
-  const { hasKey } = initDb(config);
-  addLog('info', `OmniRoute SQLite connected. Encryption active: ${hasKey}`);
-} catch (err) {
-  addLog('error', `Failed to initialize database: ${err.message}`);
-}
-
-function setCorsHeaders(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-}
-
-function jsonResponse(res, statusCode, data) {
-  setCorsHeaders(null, res);
-  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(data, null, 2));
-}
-
-const server = http.createServer(async (req, res) => {
-  setCorsHeaders(req, res);
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
+async function readBody(req) {
+  if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] || ''))
+    throw new BridgeError('JSON_REQUIRED', 'Use application/json', 415);
+  if (Number(req.headers['content-length'] || 0) > MAX_BODY_BYTES)
+    throw new BridgeError('BODY_TOO_LARGE', 'Request body exceeds the size limit', 413);
+  const chunks = []; let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw new BridgeError('BODY_TOO_LARGE', 'Request body exceeds the size limit', 413);
+    chunks.push(chunk);
   }
+  try {
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error();
+    return body;
+  } catch { throw new BridgeError('INVALID_JSON', 'A JSON object is required'); }
+}
 
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  const pathname = url.pathname;
-
-  // GET /health
-  if (req.method === 'GET' && (pathname === '/health' || pathname === '/')) {
-    return jsonResponse(res, 200, {
-      status: 'online',
-      service: 'OmniRoute Chrome Cookie Sync Bridge',
-      version: '1.0.0',
-      bridgePort: config.port,
-      omniroutePort: 20128,
-      timestamp: new Date().toISOString()
+export function createBridge({ gateway, service, state, persist }) {
+  let pairing = null; let pairingAttempts = []; let requests = [];
+  let readiness = { checkedAt: 0, ready: false };
+  function reply(res, status, data) {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'" });
+    res.end(JSON.stringify(data));
+  }
+  async function ready() {
+    if (Date.now() - readiness.checkedAt < 3000) return readiness;
+    try { await gateway.listConnections(); readiness = { checkedAt: Date.now(), ready: true }; }
+    catch (error) { readiness = { checkedAt: Date.now(), ready: false, error: publicError(error).message }; }
+    return readiness;
+  }
+  const server = http.createServer((req, res) => {
+    handle(req, res).catch(error => {
+      req.resume();
+      if (!res.headersSent && !res.destroyed) reply(res, error instanceof BridgeError ? error.status : 500,
+        { success: false, error: publicError(error) });
+      else if (!res.destroyed) res.end();
     });
-  }
-
-  // GET /api/status
-  if (req.method === 'GET' && pathname === '/api/status') {
-    try {
-      const providers = getMonitoredProviders();
-      return jsonResponse(res, 200, {
-        success: true,
-        providers,
-        recentLogs: logs.slice(0, 10),
-        totalProviders: providers.length
-      });
-    } catch (err) {
-      addLog('error', 'Error fetching status', { error: err.message });
-      return jsonResponse(res, 500, { success: false, error: err.message });
+  });
+  server.requestTimeout = 30000;
+  server.headersTimeout = 10000;
+  server.maxHeadersCount = 40;
+  async function handle(req, res) {
+    if (!/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(req.headers.host || '') || !req.url?.startsWith('/') || req.url.startsWith('//'))
+      throw new BridgeError('INVALID_REQUEST_TARGET', 'Invalid local request target');
+    let pathname;
+    try { pathname = new URL(req.url, 'http://localhost').pathname; }
+    catch { throw new BridgeError('INVALID_REQUEST_TARGET', 'Invalid request URL'); }
+    const origin = req.headers.origin;
+    const isPair = pathname === '/api/pair';
+    const isHealth = pathname === '/health' || pathname === '/';
+    if (origin && !((isPair || isHealth) ? EXTENSION_ORIGIN.test(origin) : origin === state.client?.origin))
+      throw new BridgeError('ORIGIN_REJECTED', 'This origin is not paired with the bridge', 403);
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     }
-  }
-
-  // GET /api/needed
-  if (req.method === 'GET' && pathname === '/api/needed') {
-    try {
-      const providers = getMonitoredProviders();
-      const activeProviderNames = providers.filter(p => p.isActive).map(p => p.provider);
-      return jsonResponse(res, 200, {
-        success: true,
-        activeProviders: activeProviderNames,
-        allProviders: providers
-      });
-    } catch (err) {
-      return jsonResponse(res, 500, { success: false, error: err.message });
+    if (req.method === 'OPTIONS') return reply(res, 204, {});
+    const now = Date.now();
+    requests = requests.filter(time => now - time < 60000);
+    if (requests.length >= 240) throw new BridgeError('RATE_LIMITED', 'Too many bridge requests; retry shortly', 429);
+    requests.push(now);
+    if (isHealth && req.method === 'GET') {
+      const health = await ready();
+      return reply(res, health.ready ? 200 : 503, { service: 'omniroute-session-sync', version: '2.0.0',
+        ready: health.ready, paired: Boolean(state.client) });
     }
-  }
-
-  // GET /api/logs
-  if (req.method === 'GET' && pathname === '/api/logs') {
-    return jsonResponse(res, 200, {
-      success: true,
-      logs
-    });
-  }
-
-  // POST /api/sync
-  if (req.method === 'POST' && pathname === '/api/sync') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const payload = JSON.parse(body || '{}');
-        const { provider, cookie, cookies, source } = payload;
-        const cookieValue = cookie || cookies;
-
-        if (!provider || !cookieValue) {
-          return jsonResponse(res, 400, {
-            success: false,
-            error: "Missing required fields: 'provider' and 'cookie'"
-          });
-        }
-
-        const result = updateProviderCookie(provider, cookieValue, { source });
-        addLog('info', `Successfully synced cookies for provider: ${provider}`, {
-          provider,
-          updatedConnections: result.updatedConnections,
-          source: source || 'chrome-extension'
-        });
-
-        return jsonResponse(res, 200, {
-          success: true,
-          message: `Synced cookies for ${provider}`,
-          result
-        });
-      } catch (err) {
-        addLog('error', 'Failed to process sync request', { error: err.message });
-        return jsonResponse(res, 500, { success: false, error: err.message });
-      }
-    });
-    return;
-  }
-
-  // POST /api/sync/bulk
-  if (req.method === 'POST' && pathname === '/api/sync/bulk') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const payload = JSON.parse(body || '{}');
-        const updates = payload.updates || [];
+    const token = /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];
+    const owner = !origin && sameSecret(token, state.ownerToken);
+    const client = sameSecret(token, state.client?.token);
+    if (!isPair && !owner && !client) throw new BridgeError('UNAUTHORIZED', 'Pair the extension before using the bridge', 401);
+    if (pathname === '/api/pairing-code' && req.method === 'POST') {
+      if (!owner) throw new BridgeError('OWNER_REQUIRED', 'Create pairing codes from the local command line', 403);
+      await readBody(req);
+      pairing = { code: randomBytes(6).toString('hex').toUpperCase(), expiresAt: now + 300000 };
+      pairingAttempts = [];
+      return reply(res, 200, { success: true, ...pairing });
+    }
+    if (isPair && req.method === 'POST') {
+      if (!origin || !EXTENSION_ORIGIN.test(origin)) throw new BridgeError('EXTENSION_REQUIRED', 'Pair from the Chrome extension', 403);
+      pairingAttempts = pairingAttempts.filter(time => now - time < 60000);
+      if (pairingAttempts.length >= 5) throw new BridgeError('PAIRING_RATE_LIMIT', 'Too many pairing attempts; wait one minute', 429);
+      pairingAttempts.push(now);
+      const body = await readBody(req);
+      if (!pairing || now > pairing.expiresAt || !sameSecret(String(body.code || '').trim().toUpperCase(), pairing.code))
+        throw new BridgeError('INVALID_PAIRING_CODE', 'Pairing code is incorrect or expired', 401);
+      const previous = { client: state.client, mappings: state.mappings, statuses: state.statuses };
+      state.client = { token: randomBytes(32).toString('hex'), origin };
+      state.mappings = {}; state.statuses = {};
+      try { await persist(); } catch (error) { Object.assign(state, previous); throw error; }
+      pairing = null;
+      return reply(res, 200, { success: true, token: state.client.token });
+    }
+    if (pathname === '/api/gateway-auth' && req.method === 'POST') {
+      if (!owner) throw new BridgeError('OWNER_REQUIRED', 'Gateway management credentials are configured locally', 403);
+      const body = await readBody(req);
+      if (typeof body.token !== 'string' || body.token.length < 16 || body.token.length > 8192 || /\s/.test(body.token))
+        throw new BridgeError('INVALID_TOKEN', 'A valid OmniRoute management token is required');
+      const previous = state.managementToken;
+      state.managementToken = body.token;
+      try { await gateway.listConnections(); await persist(); }
+      catch (error) { state.managementToken = previous; throw error; }
+      readiness.checkedAt = 0;
+      return reply(res, 200, { success: true });
+    }
+    if (pathname === '/api/status' && req.method === 'GET') {
+      let providers = []; let models = []; let error;
+      try { providers = await service.status(); }
+      catch (cause) { error = publicError(cause).message; }
+      if (!error) { try { models = await gateway.listModels(); } catch { /* Sync remains available if model discovery fails. */ } }
+      return reply(res, 200, { success: true, paired: Boolean(state.client), bridge: { ready: !error, error },
+        providers, models, fallback: state.fallback });
+    }
+    if (pathname === '/api/needed' && req.method === 'GET')
+      return reply(res, 200, { success: true, providers: await service.status() });
+    if (req.method === 'POST') {
+      const body = await readBody(req);
+      if (pathname === '/api/mappings') return reply(res, 200, await service.setMapping(body.provider, body.connectionId));
+      if (pathname === '/api/sync') return reply(res, 200, await service.sync(body));
+      if (pathname === '/api/validate') return reply(res, 200, await service.validate(body.provider));
+      if (pathname === '/api/fallback') return reply(res, 200, await service.saveFallback(body.models));
+      if (pathname === '/api/sync/bulk') {
+        if (!Array.isArray(body.updates) || body.updates.length > 6) throw new BridgeError('INVALID_BULK', 'Supply at most six provider updates');
         const results = [];
-
-        for (const item of updates) {
-          const { provider, cookie, cookies, source } = item;
-          const cookieValue = cookie || cookies;
-          if (provider && cookieValue) {
-            try {
-              const resObj = updateProviderCookie(provider, cookieValue, { source });
-              results.push({ provider, success: true, result: resObj });
-              addLog('info', `Bulk synced: ${provider}`);
-            } catch (e) {
-              results.push({ provider, success: false, error: e.message });
-              addLog('warn', `Failed bulk sync for ${provider}: ${e.message}`);
-            }
-          }
+        for (const item of body.updates) {
+          try { results.push({ provider: item?.provider, ...await service.sync(item || {}) }); }
+          catch (error) { results.push({ success: false, error: publicError(error) }); }
         }
-
-        return jsonResponse(res, 200, {
-          success: true,
-          count: results.length,
-          results
-        });
-      } catch (err) {
-        addLog('error', 'Failed to process bulk sync', { error: err.message });
-        return jsonResponse(res, 500, { success: false, error: err.message });
+        const success = results.every(item => item.success);
+        return reply(res, success ? 200 : 207, { success, count: results.filter(item => item.success).length, results });
       }
-    });
-    return;
+    }
+    throw new BridgeError('NOT_FOUND', 'Endpoint not found', 404);
   }
+  return server;
+}
 
-  // 404 fallback
-  return jsonResponse(res, 404, { success: false, error: 'Endpoint not found' });
-});
-
-server.listen(config.port, config.host, () => {
-  addLog('info', `OmniRoute Cookie Sync Bridge listening on http://${config.host}:${config.port}`);
-  console.log(`\n======================================================`);
-  console.log(`  OmniRoute Chrome Cookie Sync Bridge Active`);
-  console.log(`  Bridge API: http://${config.host}:${config.port}`);
-  console.log(`  Status endpoint: http://${config.host}:${config.port}/api/status`);
-  console.log(`======================================================\n`);
-});
+export async function main() {
+  const config = JSON.parse(await fs.readFile(new URL('./config.json', import.meta.url), 'utf8'));
+  if (config.host !== '127.0.0.1' || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535)
+    throw new BridgeError('INVALID_CONFIG', 'Configure a loopback bridge port between 1024 and 65535', 500);
+  const { state, persist, filename } = await loadState();
+  const gateway = new OmniClient({ baseUrl: config.omnirouteBaseUrl, headers: gatewayHeaders(state, config), allowCloudSync: config.allowCloudSync === true });
+  const service = new SyncService({ gateway, state, persist });
+  const server = createBridge({ gateway, service, state, persist });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); });
+  console.log(`Session Sync v2: http://${config.host}:${config.port}`);
+  console.log(`Private bridge configuration: ${filename}`);
+  console.log('To pair Chrome, run: node scripts/pair.mjs');
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { server.close(); server.closeIdleConnections(); });
+  return server;
+}
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
+  main().catch(error => {
+    console.error(error.code === 'EADDRINUSE' ? 'The bridge port is already in use. Use the running bridge or stop it before restarting.' : publicError(error).message);
+    process.exitCode = 1;
+  });
+}

@@ -1,0 +1,8 @@
+node_modules/
+bridge/runtime/
+artifacts/
+.env
+.env.*
+*.log
+.playwright-mcp/
+.playwright-mcp/

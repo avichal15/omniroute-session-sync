@@ -1,217 +1,72 @@
-/**
- * Tailored Cookie Extractors & Formatters for OmniRoute Web Providers
- */
-
-export async function extractAllCookiesForDomain(url) {
-  try {
-    return await chrome.cookies.getAll({ url });
-  } catch (err) {
-    console.error('Error fetching cookies for ' + url, err);
-    return [];
+/** Provider contracts shared by Chrome and the bridge. Never log extracted values. */
+export const PROVIDERS = Object.freeze({
+  'chatgpt-web': { name: 'ChatGPT Web', url: 'https://chatgpt.com/', domains: ['chatgpt.com', 'openai.com'] },
+  'gemini-web': { name: 'Gemini Web', url: 'https://gemini.google.com/', domains: ['google.com'] },
+  'zai-web': { name: 'Z.ai Web', url: 'https://chat.z.ai/', domains: ['z.ai'] },
+  'qwen-web': { name: 'Qwen Web', url: 'https://chat.qwen.ai/', domains: ['qwen.ai'] },
+  'grok-web': { name: 'Grok Web', url: 'https://grok.com/', domains: ['grok.com'] },
+  'deepseek-web': { name: 'DeepSeek Web', url: 'https://chat.deepseek.com/', domains: ['deepseek.com'] },
+});
+const AUTH_NAMES = {
+  'gemini-web': ['__Secure-1PSID', '__Secure-1PSIDTS', '__Secure-1PSIDCC', '__Secure-1PAPISID'],
+  'zai-web': ['token'],
+  'qwen-web': ['token', 'tongyi_sso_ticket', 'cna', 'ssxmod_itna', 'ssxmod_itna2'],
+  'grok-web': ['sso', 'sso-rw', 'cf_clearance', '__cf_bm'],
+  'deepseek-web': ['userToken', 'token'],
+};
+export function matchCookieProvider(domain, name) {
+  const host = String(domain).replace(/^\./, '').toLowerCase();
+  for (const [provider, meta] of Object.entries(PROVIDERS)) {
+    if (!meta.domains.some(d => host === d || host.endsWith('.' + d))) continue;
+    const relevant = provider === 'chatgpt-web'
+      ? /^__Secure-next-auth\.session-token(?:\.\d+)?$/.test(name) : AUTH_NAMES[provider].includes(name);
+    return relevant ? provider : null;
   }
+  return null;
 }
-
-export function formatCookieString(cookies) {
-  return cookies.map(c => `${c.name}=${c.value}`).join('; ');
-}
-
-export function getCookieMap(cookies) {
-  const map = {};
-  for (const c of cookies) {
-    map[c.name] = c.value;
-  }
+function cookieMap(cookies) {
+  const map = new Map();
+  for (const c of cookies) if (!map.has(c.name) && typeof c.value === 'string') map.set(c.name, c.value);
   return map;
 }
-
-// 1. ChatGPT Web
-export async function extractChatGPT() {
-  const cookies = await extractAllCookiesForDomain('https://chatgpt.com');
-  const map = getCookieMap(cookies);
-
-  // Check for chunked NextAuth session tokens
-  const chunk0 = map['__Secure-next-auth.session-token.0'];
-  const chunk1 = map['__Secure-next-auth.session-token.1'];
-  const chunk2 = map['__Secure-next-auth.session-token.2'];
-  const single = map['__Secure-next-auth.session-token'];
-
-  let formattedValue = '';
-  let tokenType = '';
-
-  if (chunk0 && chunk1) {
-    // Concatenate chunks back-to-back
-    formattedValue = chunk0 + chunk1 + (chunk2 || '');
-    tokenType = 'chunked-concatenated';
-  } else if (single) {
-    formattedValue = single;
-    tokenType = 'single-token';
-  } else {
-    // Check if full Cookie header has valid tokens
-    const relevant = cookies.filter(c => c.name.includes('session-token') || c.name.includes('cf_clearance') || c.name.includes('oai-'));
-    if (relevant.length > 0) {
-      formattedValue = formatCookieString(relevant);
-      tokenType = 'cookie-header';
-    }
-  }
-
-  return {
-    provider: 'chatgpt-web',
-    name: 'ChatGPT Web',
-    domain: 'chatgpt.com',
-    hasCredentials: Boolean(formattedValue),
-    cookieValue: formattedValue,
-    tokenType,
-    cookieCount: cookies.length
-  };
+function header(map, names = [...map.keys()]) {
+  return [...new Set(names)].sort().filter(name => map.get(name)).map(name => `${name}=${map.get(name)}`).join('; ');
 }
-
-// 2. Gemini Web
-export async function extractGemini() {
-  const cookies = await extractAllCookiesForDomain('https://gemini.google.com');
-  const googleCookies = await extractAllCookiesForDomain('https://google.com');
-  const allCookies = [...cookies, ...googleCookies];
-  const map = getCookieMap(allCookies);
-
-  const psid = map['__Secure-1PSID'];
-  const psidts = map['__Secure-1PSIDTS'];
-  const psidcc = map['__Secure-1PSIDCC'];
-  const papisid = map['__Secure-1PAPISID'];
-
-  let formattedValue = '';
-  if (psid) {
-    const parts = [`__Secure-1PSID=${psid}`];
-    if (psidts) parts.push(`__Secure-1PSIDTS=${psidts}`);
-    if (psidcc) parts.push(`__Secure-1PSIDCC=${psidcc}`);
-    if (papisid) parts.push(`__Secure-1PAPISID=${papisid}`);
-    formattedValue = parts.join('; ');
+function sessionToken(map) {
+  const chunks = [...map.entries()].filter(([name]) => /^__Secure-next-auth\.session-token\.\d+$/.test(name))
+    .map(([name, value]) => ({ index: Number(name.split('.').at(-1)), value })).sort((a, b) => a.index - b.index);
+  if (chunks.length) {
+    if (chunks.some((chunk, index) => chunk.index !== index || !chunk.value)) return '';
+    return chunks.map(chunk => chunk.value).join('');
   }
-
-  return {
-    provider: 'gemini-web',
-    name: 'Gemini Web',
-    domain: 'gemini.google.com',
-    hasCredentials: Boolean(psid),
-    cookieValue: formattedValue,
-    hasTimestampTicket: Boolean(psidts),
-    cookieCount: allCookies.length
-  };
+  return map.get('__Secure-next-auth.session-token') || '';
 }
-
-// 3. Z.ai Web
-export async function extractZai() {
-  const cookies = await extractAllCookiesForDomain('https://chat.z.ai');
-  const rootCookies = await extractAllCookiesForDomain('https://z.ai');
-  const allCookies = [...cookies, ...rootCookies];
-  const map = getCookieMap(allCookies);
-
-  const token = map['token'];
-  let formattedValue = '';
-
-  if (token) {
-    // If it's a JWT, pass token or full header
-    formattedValue = `token=${token}`;
-  } else if (allCookies.length > 0) {
-    formattedValue = formatCookieString(allCookies);
+export function validCredential(provider, value) {
+  if (!Object.hasOwn(PROVIDERS, provider) || typeof value !== 'string' || !value.trim()
+      || value.length > 65536 || /[\r\n\0]/.test(value) || value.startsWith('enc:v1:')) return false;
+  const fields = new Map(value.split(';').map(pair => {
+    const index = pair.indexOf('=');
+    return index < 0 ? ['', ''] : [pair.slice(0, index).trim(), pair.slice(index + 1).trim()];
+  }));
+  if (provider === 'chatgpt-web') return !/[;\s]/.test(value);
+  if (provider === 'deepseek-web') {
+    try { const parsed = JSON.parse(value); return typeof parsed?.value === 'string' && Boolean(parsed.value.trim()); }
+    catch { return !/[;=\s]/.test(value); }
   }
-
-  return {
-    provider: 'zai-web',
-    name: 'Z.ai Web',
-    domain: 'chat.z.ai',
-    hasCredentials: Boolean(token || formattedValue),
-    cookieValue: formattedValue,
-    hasToken: Boolean(token),
-    cookieCount: allCookies.length
-  };
+  const required = { 'gemini-web': ['__Secure-1PSID'], 'zai-web': ['token'],
+    'qwen-web': ['token', 'tongyi_sso_ticket'], 'grok-web': ['sso'] }[provider];
+  return required.some(name => Boolean(fields.get(name)));
 }
-
-// 4. Qwen Web
-export async function extractQwen() {
-  const cookies = await extractAllCookiesForDomain('https://chat.qwen.ai');
-  const rootCookies = await extractAllCookiesForDomain('https://qwen.ai');
-  const allCookies = [...cookies, ...rootCookies];
-  const map = getCookieMap(allCookies);
-
-  let formattedValue = '';
-  if (allCookies.length > 0) {
-    formattedValue = formatCookieString(allCookies);
-  }
-
-  return {
-    provider: 'qwen-web',
-    name: 'Qwen Web',
-    domain: 'chat.qwen.ai',
-    hasCredentials: Boolean(formattedValue),
-    cookieValue: formattedValue,
-    hasToken: Boolean(map['token'] || map['tongyi_sso_ticket']),
-    cookieCount: allCookies.length
-  };
-}
-
-// 5. Grok Web
-export async function extractGrok() {
-  const cookies = await extractAllCookiesForDomain('https://grok.com');
-  const map = getCookieMap(cookies);
-
-  const sso = map['sso'];
-  const ssoRw = map['sso-rw'];
-  const cfClearance = map['cf_clearance'];
-  const cfBm = map['__cf_bm'];
-
-  let formattedValue = '';
-  if (sso) {
-    const parts = [`sso=${sso}`];
-    if (ssoRw) parts.push(`sso-rw=${ssoRw}`);
-    if (cfClearance) parts.push(`cf_clearance=${cfClearance}`);
-    if (cfBm) parts.push(`__cf_bm=${cfBm}`);
-    formattedValue = parts.join('; ');
-  }
-
-  return {
-    provider: 'grok-web',
-    name: 'Grok Web',
-    domain: 'grok.com',
-    hasCredentials: Boolean(sso),
-    cookieValue: formattedValue,
-    cookieCount: cookies.length
-  };
-}
-
-// 6. DeepSeek Web
-export async function extractDeepSeek() {
-  const cookies = await extractAllCookiesForDomain('https://chat.deepseek.com');
-  const map = getCookieMap(cookies);
-  const userToken = map['userToken'] || map['token'];
-  let formattedValue = userToken || (cookies.length > 0 ? formatCookieString(cookies) : '');
-
-  return {
-    provider: 'deepseek-web',
-    name: 'DeepSeek Web',
-    domain: 'chat.deepseek.com',
-    hasCredentials: Boolean(formattedValue),
-    cookieValue: formattedValue,
-    cookieCount: cookies.length
-  };
-}
-
-// Master Extractor Map
-export const EXTRACTORS = {
-  'chatgpt-web': extractChatGPT,
-  'gemini-web': extractGemini,
-  'zai-web': extractZai,
-  'qwen-web': extractQwen,
-  'grok-web': extractGrok,
-  'deepseek-web': extractDeepSeek
-};
-
-export async function extractAllConfigured() {
-  const results = {};
-  for (const [provider, extractor] of Object.entries(EXTRACTORS)) {
-    try {
-      results[provider] = await extractor();
-    } catch (err) {
-      console.error(`Failed to extract for ${provider}:`, err);
-      results[provider] = { provider, hasCredentials: false, error: err.message };
-    }
-  }
-  return results;
+export async function extractForProvider(provider, readCookies = url => chrome.cookies.getAll({ url })) {
+  const meta = PROVIDERS[provider];
+  if (!meta) throw new Error('Unsupported browser provider');
+  const cookies = await readCookies(meta.url);
+  const map = cookieMap(cookies);
+  let cookieValue = '';
+  if (provider === 'chatgpt-web') cookieValue = sessionToken(map);
+  else if (provider === 'deepseek-web') cookieValue = map.get('userToken') || map.get('token') || '';
+  else if (provider === 'qwen-web') cookieValue = header(map);
+  else cookieValue = header(map, AUTH_NAMES[provider]);
+  const hasCredentials = validCredential(provider, cookieValue);
+  return { provider, name: meta.name, hasCredentials, cookieValue: hasCredentials ? cookieValue : '', cookieCount: cookies.length };
 }

@@ -2,39 +2,83 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>OmniRoute Session Sync</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="header">
-    <div class="logo-group">
-      <div class="logo-icon">⚡</div>
+  <header class="header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">O</span>
       <div>
         <h1>OmniRoute Sync</h1>
-        <div class="subtitle">Auto-Sync Chrome Cookies</div>
+        <p class="subtitle">Your browser sessions, connected</p>
       </div>
     </div>
-    <div id="bridgeStatusBadge" class="badge badge-offline">Checking...</div>
-  </div>
+    <span id="bridgeStatusBadge" class="badge" data-state="pending">Checking</span>
+  </header>
 
-  <div class="main-actions">
-    <button id="syncAllBtn" class="btn btn-primary">
-      <span class="btn-icon">🔄</span> Sync All Active Sessions
-    </button>
-  </div>
+  <main>
+    <p id="statusNotice" class="status-notice" role="status" aria-live="polite">Checking the local bridge…</p>
 
-  <div class="section-title">MONITORED WEB PROVIDERS</div>
-  <div id="providersList" class="providers-list">
-    <div class="loading">Inspecting browser sessions...</div>
-  </div>
+    <section id="pairingSection" class="panel pairing" aria-labelledby="pairingTitle" hidden>
+      <p class="eyebrow">One-time setup</p>
+      <h2 id="pairingTitle">Pair this browser</h2>
+      <p class="description">In the session-sync project folder, run:</p>
+      <code class="command">node scripts/pair.mjs</code>
+      <p id="pairingHelp" class="description">Keep the bridge running, then enter the pairing code shown in your terminal.</p>
+      <form id="pairForm">
+        <label for="pairCode">Pairing code</label>
+        <div class="input-row">
+          <input id="pairCode" name="code" type="text" autocomplete="off" spellcheck="false" maxlength="128" aria-describedby="pairingHelp" placeholder="Enter code" required>
+          <button id="pairBtn" class="button button-primary" type="submit">Pair browser</button>
+        </div>
+      </form>
+      <p id="pairFeedback" class="feedback" role="status" aria-live="polite"></p>
+    </section>
 
-  <div class="footer">
-    <div id="lastSyncLabel" class="last-sync">Last synced: Never</div>
-    <div class="links">
-      <a href="http://localhost:20128" target="_blank">Open OmniRoute UI</a>
+    <div id="pairedContent" hidden>
+      <section aria-labelledby="providersTitle">
+        <div class="section-heading">
+          <h2 id="providersTitle">Browser providers</h2>
+          <button id="syncAllBtn" class="button button-small" type="button" disabled>Sync all</button>
+        </div>
+        <p class="description section-intro">Choose an active connection for each provider. Sync its session, then Test to verify access.</p>
+        <div id="providersList" class="providers-list"></div>
+      </section>
+
+      <section class="panel fallback" aria-labelledby="fallbackTitle">
+        <div class="section-heading">
+          <h2 id="fallbackTitle">Fallback order</h2>
+          <span id="fallbackSavedBadge" class="badge">Not saved</span>
+        </div>
+        <p class="alias-label">Model alias <code>browser-sessions</code></p>
+        <p class="description">Add 1–8 browser models in the order OmniRoute should try them. Your existing OmniRoute API key stays the same.</p>
+        <ol id="fallbackList" class="fallback-list" aria-label="Models in fallback order"></ol>
+        <p id="fallbackEmpty" class="empty-state">Add your first browser model below.</p>
+        <label for="fallbackModel">Browser model</label>
+        <div class="input-row model-picker">
+          <select id="fallbackModel" disabled>
+            <option value="">Choose a browser model</option>
+          </select>
+          <button id="addModelBtn" class="button" type="button" disabled>Add</button>
+        </div>
+        <div class="fallback-save-row">
+          <span id="fallbackCount" class="description">0 of 8 models</span>
+          <button id="saveFallbackBtn" class="button button-primary" type="button" disabled>Save fallback</button>
+        </div>
+        <p id="fallbackFeedback" class="feedback" role="status" aria-live="polite"></p>
+      </section>
     </div>
-  </div>
 
+    <p id="actionFeedback" class="feedback global-feedback" role="status" aria-live="polite"></p>
+  </main>
+
+  <footer class="footer">
+    <a href="http://localhost:20128" target="_blank" rel="noopener noreferrer">Open OmniRoute <span aria-hidden="true">↗</span></a>
+    <button id="refreshBtn" class="button button-text" type="button">Refresh</button>
+  </footer>
   <script src="popup.js"></script>
 </body>
 </html>

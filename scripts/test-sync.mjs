@@ -1,21 +1,9 @@
-import { updateProviderCookie, getMonitoredProviders, decrypt } from '../bridge/dbUpdater.mjs';
-
-console.log('\n======================================================');
-console.log('   Testing Cookie Update & Encryption Integrity');
-console.log('======================================================\n');
-
-const testCookie = "token=test_simulated_token_" + Date.now();
-console.log('Testing update on zai-web with simulated token...');
-
-try {
-  const res = await updateProviderCookie('zai-web', testCookie, { source: 'test-script' });
-  console.log('[OK] Update result:', res);
-
-  const providers = getMonitoredProviders();
-  const zai = providers.find(p => p.provider === 'zai-web');
-  console.log('[OK] Verified updated row in SQLite:');
-  console.log(`     Provider: ${zai.provider}, UpdatedAt: ${zai.updatedAt}, Preview: ${zai.keyPreview}`);
-  console.log('\n[SUCCESS] Encryption, SQLite update, and decryption passed 100% cleanly!\n');
-} catch (err) {
-  console.error('[FAIL] Test error:', err.message);
-}
+// Tests are isolated fixtures. This entry point never imports a live database updater.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+const directory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../tests');
+const files = fs.readdirSync(directory).filter(name => name.endsWith('.test.mjs')).map(name => path.join(directory, name));
+const result = spawnSync(process.execPath, ['--test', ...files], { stdio: 'inherit', windowsHide: true });
+process.exitCode = result.status ?? 1;

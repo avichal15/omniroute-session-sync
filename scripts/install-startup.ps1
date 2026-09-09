@@ -5,8 +5,8 @@ $shortcutPath = Join-Path $startupFolder "OmniRoute-Cookie-Bridge.lnk"
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut($shortcutPath)
 $Shortcut.TargetPath = "wscript.exe"
-$Shortcut.Arguments = """C:\omni\scripts\start-silent.vbs"""
-$Shortcut.WorkingDirectory = "C:\omni\bridge"
+$Shortcut.Arguments = '"' + (Join-Path $PSScriptRoot 'start-silent.vbs') + '"'
+$Shortcut.WorkingDirectory = Join-Path (Split-Path -Parent $PSScriptRoot) 'bridge'
 $Shortcut.Description = "OmniRoute Chrome Cookie Sync Bridge"
 $Shortcut.Save()
 
