@@ -10,11 +10,13 @@ Install the preload in OmniRoute's existing local environment file and reuse its
 
 ## Work
 
-- [ ] Add an embedded startup adapter with main-thread/entrypoint guards and observable hosting mode.
-- [ ] Prove that a paired extension token and mapping continue to work after the OmniRoute host process restarts, using synthetic sessions only.
-- [ ] Add and test an idempotent local installer that preserves existing environment/startup configuration.
-- [ ] Install against the user's existing OmniRoute startup path and switch the live service to embedded hosting.
-- [ ] Verify both ports belong to the same OmniRoute process, management access remains ready, cloud sync stays off, and the existing fallback still works.
+- [x] Add an embedded startup adapter with main-thread/entrypoint guards and observable hosting mode.
+- [x] Prove that a paired extension token and mapping continue to work after the OmniRoute host process restarts, using synthetic sessions only.
+- [x] Add and test an idempotent local installer that preserves existing environment/startup configuration.
+- [x] Install against the user's existing OmniRoute startup path and switch the live service to embedded hosting.
+- [x] Verify both ports belong to the same OmniRoute process, management access remains ready, cloud sync stays off, and the existing fallback still works.
 - [ ] Finish the one-time reload/pairing in the signed-in Chrome profile if user-controlled browser setup is available; report any remaining manual initial setup exactly.
 
 This does not promise to renew a provider-revoked browser session or run Chrome's extension while Chrome is completely closed. Routine reboots do not require re-pairing or token copying.
+
+Installed and verified: the existing `StartOmniRoute.vbs` now calls the hidden integrated launcher; the scoped preload is present in OmniRoute's existing environment file. A cold launch through that actual startup entry produced one process listening on both 20128 and 20129. Health reported embedded hosting and ready status; a second launch detected the existing gateway. The unchanged browser-only combo returned HTTP 200 and PONG from gpt-5.5 in about 22.8 seconds. All 61 isolated tests passed. Chrome background permission was added; loading and pairing the extension in the user's signed-in profile remains the initial user-controlled step.
