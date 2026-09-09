@@ -8,7 +8,8 @@
   "permissions": [
     "cookies",
     "storage",
-    "alarms"
+    "alarms",
+    "background"
   ],
   "host_permissions": [
     "https://*.chatgpt.com/*",
