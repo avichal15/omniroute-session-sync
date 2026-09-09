@@ -113,7 +113,7 @@ async function stopChild(child) {
     await exec(taskkill, ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }).catch(() => {});
   } else child.kill('SIGTERM');
   if (child.exitCode === null && child.signalCode === null)
-    await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(5000)]);
+    await Promise.race([new Promise(resolve => child.once('exit', resolve)), delay(5000, undefined, { ref: false })]);
 }
 
 export async function runSupervisor({ directory = dataDirectory(), signal, pollMs = 10000, retryMs = 10000 } = {}) {
