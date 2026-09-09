@@ -1,8 +1,9 @@
 {
   "name": "omniroute-cookie-bridge",
   "version": "2.0.0",
-  "private": true,
-  "engines": { "node": ">=24.0.0 <27" },
+  "engines": {
+    "node": ">=24.0.0 <27"
+  },
   "description": "Automated Cookie & Session Sync Bridge for OmniRoute and Google Chrome",
   "type": "module",
   "main": "server.mjs",
@@ -11,5 +12,7 @@
     "status": "node ../scripts/status.mjs",
     "pair": "node ../scripts/pair.mjs",
     "test": "node ../scripts/test-sync.mjs"
-  }
+  },
+  "license": "MIT",
+  "author": "Avichal Goyal"
 }

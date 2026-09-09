@@ -1,10 +1,13 @@
 {
   "name": "omniroute-session-sync",
   "version": "2.0.0",
-  "private": true,
   "type": "module",
-  "workspaces": ["bridge"],
-  "engines": { "node": ">=24.0.0 <27" },
+  "workspaces": [
+    "bridge"
+  ],
+  "engines": {
+    "node": ">=24.0.0 <27"
+  },
   "scripts": {
     "start": "node bridge/server.mjs",
     "test": "node scripts/test-sync.mjs",
@@ -15,5 +18,7 @@
     "setup:embedded": "node scripts/install-embedded.mjs",
     "start:integrated": "node scripts/start-integrated.mjs",
     "verify": "node scripts/check.mjs && node scripts/test-sync.mjs"
-  }
+  },
+  "license": "MIT",
+  "author": "Avichal Goyal"
 }
