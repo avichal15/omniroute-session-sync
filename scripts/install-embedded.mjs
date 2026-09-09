@@ -47,20 +47,29 @@ export async function installEmbedded({ dryRun = false } = {}) {
     if (content !== null) existing.push({ filename, content });
   }
   if (existing.length > 1) throw new Error('Multiple OmniRoute startup scripts exist; consolidate them before setup.');
-  const startupPath = existing[0]?.filename || path.join(startupDir, 'OmniRoute.vbs');
-  const previousStartup = existing[0]?.content ?? null;
-  if (previousStartup !== null && !/omniroute|start-integrated\.mjs/i.test(previousStartup))
+  const legacyStartup = existing[0];
+  if (legacyStartup && !/omniroute|start-integrated\.mjs/i.test(legacyStartup.content))
     throw new Error('The existing startup file does not appear to launch OmniRoute.');
-  const startupSource = startupVbs(process.execPath, launcherPath);
   const directory = dataDirectory();
+  const startupPath = path.join(directory, 'start-integrated.vbs');
+  const previousStartup = await readOptional(startupPath);
+  const startupSource = startupVbs(process.execPath, launcherPath, { directory, configPath: path.join(projectDir, 'bridge', 'config.json') });
+  const startupTaskName = 'OmniRoute Session Sync';
+  const taskScript = path.join(projectDir, 'scripts', 'register-autostart.ps1');
+  const taskCommand = mode => exec(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', taskScript, '-Mode', mode, '-LauncherPath', startupPath, '-TaskName', startupTaskName], { windowsHide: true });
+  const task = JSON.parse((await taskCommand('Inspect')).stdout);
+  if (!task.owned) throw new Error('An unrelated Windows task already uses the startup task name.');
   const recordFile = path.join(directory, 'installation.json');
   const priorRecord = JSON.parse(await readOptional(recordFile) || 'null');
   const record = { version: 1, projectDir, omniInstallDir, omniDataDir, envFile, cliPath,
     nodePath: process.execPath, preload, startupPath, launcherPath,
-    serveArgs: priorRecord?.serveArgs || ['serve', '--no-open', ...(/--tray\b/.test(previousStartup || '') ? ['--tray'] : [])] };
-  const changed = previousEnv !== updatedEnv || previousStartup !== startupSource
+    startupType: 'scheduled-task', startupTaskName,
+    previousStartupPath: priorRecord?.previousStartupPath || legacyStartup?.filename || null,
+    serveArgs: priorRecord?.serveArgs || ['serve', '--no-open', ...(/--tray\b/.test(legacyStartup?.content || '') ? ['--tray'] : [])] };
+  const changed = previousEnv !== updatedEnv || previousStartup !== startupSource || Boolean(legacyStartup) || !task.matches
     || Object.entries(record).some(([key, value]) => JSON.stringify(priorRecord?.[key]) !== JSON.stringify(value));
-  const summary = { success: true, changed, envFile, startupPath, preload, lifecycle: 'omniroute' };
+  const summary = { success: true, changed, envFile, startupPath, startupTaskName, preload, lifecycle: 'omniroute' };
   if (dryRun) return { ...summary, dryRun: true };
   await secureDirectory(directory);
   if (changed) {
@@ -68,12 +77,20 @@ export async function installEmbedded({ dryRun = false } = {}) {
     await secureDirectory(backupDir);
     if (previousEnv !== null) await fs.writeFile(path.join(backupDir, 'omniroute.env'), previousEnv, { mode: 0o600 });
     if (previousStartup !== null) await fs.writeFile(path.join(backupDir, 'startup.vbs'), previousStartup, { mode: 0o600 });
+    if (legacyStartup) await fs.writeFile(path.join(backupDir, 'legacy-startup.vbs'), legacyStartup.content, { mode: 0o600 });
     if (priorRecord) await fs.writeFile(path.join(backupDir, 'installation.json'), JSON.stringify(priorRecord, null, 2), { mode: 0o600 });
     await fs.mkdir(omniDataDir, { recursive: true });
-    await fs.mkdir(startupDir, { recursive: true });
     await writeAtomic(envFile, updatedEnv);
-    await writeAtomic(recordFile, JSON.stringify({ ...record, backupDir, installedAt: new Date().toISOString() }, null, 2));
     await writeAtomic(startupPath, startupSource);
+    await taskCommand('Install');
+    await writeAtomic(recordFile, JSON.stringify({ ...record, backupDir, installedAt: new Date().toISOString() }, null, 2));
+    // Remove only the inspected legacy entry, after the replacement is registered.
+    if (legacyStartup) {
+      if (path.dirname(path.resolve(legacyStartup.filename)) !== path.resolve(startupDir)
+        || await readOptional(legacyStartup.filename) !== legacyStartup.content)
+        throw new Error('The legacy startup entry changed during installation; it was preserved.');
+      await fs.unlink(legacyStartup.filename);
+    }
     summary.backupDir = backupDir;
   }
   return summary;

@@ -28,8 +28,14 @@ export function updateNodeOptions(content, preload) {
   return content + (content && !content.endsWith('\n') ? newline : '') + replacement + newline;
 }
 
-export function startupVbs(nodePath, launcherPath) {
-  if ([nodePath, launcherPath].some(value => /[\r\n\0"]/.test(value))) throw new Error('Invalid startup path');
-  const command = `"${nodePath}" "${launcherPath}"`.replaceAll('"', '""');
-  return `' OmniRoute with persistent Session Sync; installed once.\r\nSet WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run "${command}", 0, False\r\n`;
+export function startupVbs(nodePath, launcherPath, { directory, configPath } = {}) {
+  if ([nodePath, launcherPath, directory, configPath].filter(value => value !== undefined)
+    .some(value => typeof value !== 'string' || /[\r\n\0"]/.test(value))) throw new Error('Invalid startup path');
+  const command = `"${nodePath}" "${launcherPath}" --watch`.replaceAll('"', '""');
+  return ["' OmniRoute with persistent Session Sync; installed once.", 'Option Explicit',
+    'Dim WshShell, SessionEnv, ExitCode', 'Set WshShell = CreateObject("WScript.Shell")',
+    'Set SessionEnv = WshShell.Environment("Process")',
+    ...(directory ? [`SessionEnv("OMNI_SYNC_DATA_DIR") = "${directory}"`] : []),
+    ...(configPath ? [`SessionEnv("OMNI_SYNC_CONFIG_FILE") = "${configPath}"`] : []),
+    `ExitCode = WshShell.Run("${command}", 0, True)`, 'WScript.Quit ExitCode', ''].join('\r\n');
 }
