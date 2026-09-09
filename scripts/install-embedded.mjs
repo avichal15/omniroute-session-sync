@@ -20,7 +20,7 @@ async function writeAtomic(filename, value) {
   } finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
 }
 
-export async function installEmbedded({ dryRun = false } = {}) {
+export async function installEmbedded({ dryRun = false, migrateFrom } = {}) {
   if (process.platform !== 'win32') throw new Error('This one-time installer currently supports Windows.');
   const projectDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const omniInstallDir = path.resolve(process.env.OMNIROUTE_INSTALL_DIR || path.join(process.env.APPDATA, 'npm', 'node_modules', 'omniroute'));
@@ -51,6 +51,16 @@ export async function installEmbedded({ dryRun = false } = {}) {
   if (legacyStartup && !/omniroute|start-integrated\.mjs/i.test(legacyStartup.content))
     throw new Error('The existing startup file does not appear to launch OmniRoute.');
   const directory = dataDirectory();
+  const legacyDirectory = migrateFrom || path.join(process.env.LOCALAPPDATA, 'OmniRouteSessionSync');
+  if (!path.isAbsolute(legacyDirectory)) throw new Error('The migration source must be an absolute directory.');
+  const stateFile = path.join(directory, 'state.json');
+  const oldState = path.resolve(legacyDirectory) !== path.resolve(directory) && await readOptional(stateFile) === null
+    ? await readOptional(path.join(legacyDirectory, 'state.json')) : null;
+  if (oldState !== null) {
+    const parsed = JSON.parse(oldState);
+    if (parsed.version !== 2 || typeof parsed.ownerToken !== 'string' || parsed.ownerToken.length < 32)
+      throw new Error('The previous sync state is invalid; it has been preserved.');
+  }
   const startupPath = path.join(directory, 'start-integrated.vbs');
   const previousStartup = await readOptional(startupPath);
   const startupSource = startupVbs(process.execPath, launcherPath, { directory, configPath: path.join(projectDir, 'bridge', 'config.json') });
@@ -61,15 +71,17 @@ export async function installEmbedded({ dryRun = false } = {}) {
   const task = JSON.parse((await taskCommand('Inspect')).stdout);
   if (!task.owned) throw new Error('An unrelated Windows task already uses the startup task name.');
   const recordFile = path.join(directory, 'installation.json');
-  const priorRecord = JSON.parse(await readOptional(recordFile) || 'null');
+  const priorRecord = JSON.parse(await readOptional(recordFile)
+    || (path.resolve(legacyDirectory) !== path.resolve(directory) ? await readOptional(path.join(legacyDirectory, 'installation.json')) : null) || 'null');
   const record = { version: 1, projectDir, omniInstallDir, omniDataDir, envFile, cliPath,
     nodePath: process.execPath, preload, startupPath, launcherPath,
     startupType: 'scheduled-task', startupTaskName,
     previousStartupPath: priorRecord?.previousStartupPath || legacyStartup?.filename || null,
     serveArgs: priorRecord?.serveArgs || ['serve', '--no-open', ...(/--tray\b/.test(legacyStartup?.content || '') ? ['--tray'] : [])] };
-  const changed = previousEnv !== updatedEnv || previousStartup !== startupSource || Boolean(legacyStartup) || !task.matches
+  const changed = oldState !== null || previousEnv !== updatedEnv || previousStartup !== startupSource || Boolean(legacyStartup) || !task.matches
     || Object.entries(record).some(([key, value]) => JSON.stringify(priorRecord?.[key]) !== JSON.stringify(value));
-  const summary = { success: true, changed, envFile, startupPath, startupTaskName, preload, lifecycle: 'omniroute' };
+  const summary = { success: true, changed, envFile, stateDirectory: directory, startupPath, startupTaskName, preload,
+    importsSavedPairing: oldState !== null, lifecycle: 'omniroute' };
   if (dryRun) return { ...summary, dryRun: true };
   await secureDirectory(directory);
   if (changed) {
@@ -79,6 +91,9 @@ export async function installEmbedded({ dryRun = false } = {}) {
     if (previousStartup !== null) await fs.writeFile(path.join(backupDir, 'startup.vbs'), previousStartup, { mode: 0o600 });
     if (legacyStartup) await fs.writeFile(path.join(backupDir, 'legacy-startup.vbs'), legacyStartup.content, { mode: 0o600 });
     if (priorRecord) await fs.writeFile(path.join(backupDir, 'installation.json'), JSON.stringify(priorRecord, null, 2), { mode: 0o600 });
+    // Copy the observed paired state exactly once; never replace a target state
+    // created concurrently or reset its tokens. Keep the source as a backup.
+    if (oldState !== null) await fs.writeFile(stateFile, oldState, { flag: 'wx', mode: 0o600 });
     await fs.mkdir(omniDataDir, { recursive: true });
     await writeAtomic(envFile, updatedEnv);
     await writeAtomic(startupPath, startupSource);
@@ -97,7 +112,9 @@ export async function installEmbedded({ dryRun = false } = {}) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  installEmbedded({ dryRun: process.argv.includes('--dry-run') }).then(result => console.log(JSON.stringify(result, null, 2)), () => {
+  const migrateIndex = process.argv.indexOf('--migrate-from');
+  installEmbedded({ dryRun: process.argv.includes('--dry-run'), migrateFrom: migrateIndex < 0 ? undefined : process.argv[migrateIndex + 1] })
+    .then(result => console.log(JSON.stringify(result, null, 2)), () => {
     console.error('Embedded setup could not complete. Check the OmniRoute installation, local environment and Windows startup files.');
     process.exitCode = 1;
   });
