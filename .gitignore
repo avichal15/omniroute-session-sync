@@ -1,8 +1,12 @@
 node_modules/
 bridge/runtime/
 artifacts/
+backups/
 .env
 .env.*
 *.log
-.playwright-mcp/
+*.log*
+*.tmp
+.DS_Store
+Thumbs.db
 .playwright-mcp/
