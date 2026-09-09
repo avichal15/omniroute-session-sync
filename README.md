@@ -15,6 +15,8 @@ Supported providers: ChatGPT Web, Gemini Web, Z.ai Web, Qwen Web, Grok Web, and 
 
 ## Setup
 
+This is a **one-time setup per Chrome profile**. Pairing, account mappings, and fallback choices survive browser restarts and laptop restarts.
+
 1. In OmniRoute, turn off Cloud Sync if sessions should remain on this PC. The bridge refuses credential updates, connection tests, and fallback changes unless OmniRoute explicitly reports cloud sync disabled. Keep `allowCloudSync: false` in `bridge/config.json`.
 2. Start the bridge using either Embedded Mode (recommended) or Standalone Mode:
 
@@ -24,6 +26,7 @@ Supported providers: ChatGPT Web, Gemini Web, Z.ai Web, Qwen Web, Grok Web, and 
    npm run setup:embedded
    ```
    This safely configures OmniRoute's `.env` with a main-thread `--import` preload and updates the silent Windows Startup launcher. The sync bridge starts automatically whenever OmniRoute launches without requiring a separate terminal window. Prior environment files and startup scripts are backed up to `%LOCALAPPDATA%\OmniRouteSessionSync\backups`.
+   If OmniRoute is already running when you install, restart its CLI supervisor once to load the preload. The sync listener then runs inside the same process as OmniRoute. Future starts reuse the saved setup automatically.
    To start OmniRoute with Session Sync immediately:
    ```powershell
    npm run start:integrated
@@ -61,6 +64,8 @@ Supported providers: ChatGPT Web, Gemini Web, Z.ai Web, Qwen Web, Grok Web, and 
 
 The bridge configuration is `bridge/config.json`. Both addresses must stay on loopback. The extension's bridge address is fixed to port 20129; changing that port also requires updating the extension's worker address and host permissions.
 
+Keep this project directory in place: the installed preload and unpacked Chrome extension use its files. Do not run standalone and embedded sync on the same port.
+
 ## Model fallback
 
 In the popup, add up to eight browser models, arrange their order, and click **Save fallback**. The bridge creates or updates the OmniRoute combo named `browser-sessions` with priority routing. It only offers known browser providers with active connections and rejects official API providers. Existing unrelated combos are preserved.
@@ -80,6 +85,7 @@ Fallback behavior, cooldowns, account selection within a provider, and which fai
 
 - Relevant cookie changes debounce independently for each provider, then send freshly read credentials.
 - Chrome startup and a one-minute alarm reconcile mapped sessions. Chrome must be running and able to wake the extension worker; timer timing is subject to Chrome and OS scheduling.
+- The extension requests Chrome's `background` permission so Chrome can start at computer login and remain running after its last window closes. Explicitly quitting Chrome, or disabling its background operation, stops browser-side work until Chrome starts again. See [Chrome's permission documentation](https://developer.chrome.com/docs/extensions/reference/permissions-list#background).
 - Failed updates remain pending and retry with the latest cookies. Successful acknowledgements are tied to the selected connection and bridge revision, so a failed write cannot suppress a later retry.
 - Cookie values are sent only to the paired local bridge. The bridge authenticates, checks the mapping and local-only setting, and calls `PUT /api/providers/:id` on OmniRoute. OmniRoute owns credential encryption and storage.
 - Signing out does not replace a saved connection with empty data. The popup requests a new browser login. Other healthy providers may still serve the fallback route.
@@ -94,6 +100,8 @@ The bridge stores its owner token, paired extension token/origin, management tok
 
 The directory is restricted to the current Windows user, or mode `0700` on other systems; the state file is written atomically. Provider cookies are **not** saved in bridge state, logs, or status responses. Chrome's extension storage retains its pairing token and non-secret sync metadata. OmniRoute necessarily stores the provider credentials it uses for inference.
 
+Embedded setup also writes `installation.json` here, containing local program/configuration paths, and saves original environment/startup files under `backups`. Those backups can contain original OmniRoute secrets and inherit the private directory permissions. Setup changes only the preload entry in OmniRoute's environment; it does not change global Node or Codex configuration. `OMNI_SYNC_CONFIG_FILE` selects an alternate bridge configuration for isolated tests or custom installations.
+
 The bridge binds to loopback, requires bearer authentication on protected routes, and binds browser access to the paired extension origin. Requests have size, timeout, and rate limits. Pair only an extension/profile you control, and keep the management key private. The bridge's local-only check governs its own writes; OmniRoute and provider websites still make network requests normally.
 
 ## Status and troubleshooting
@@ -102,7 +110,7 @@ The bridge binds to loopback, requires bearer authentication on protected routes
 npm run status
 ```
 
-- **Bridge unavailable:** start `npm start`; check that ports 20128 and 20129 are reachable locally.
+- **Bridge unavailable:** start OmniRoute with `npm run start:integrated`; check that ports 20128 and 20129 are reachable locally. Restart the CLI supervisor once if embedded setup was installed while it was already running.
 - **Management authentication failed:** configure a current `manage`-scoped key with `npm run configure -- --stdin`.
 - **Pairing expired or invalid:** run `npm run pair` for a new code. If another profile replaced the pairing, pair this profile again and reselect its connections.
 - **Unknown action / Reload extension:** Chrome may still be running the previous background worker while loading the updated popup. Close the popup, open `chrome://extensions` in the profile where you use the provider, and click the extension's Reload arrow. Reopen the popup and pair with a fresh code. Confirm the loaded extension folder is this project's `extension` directory if the message persists. The popup's Refresh button only fetches status; it does not reload Chrome's extension worker.
@@ -112,7 +120,7 @@ npm run status
 - **Synced but not validated:** run Test or make a small inference request. Cookie storage success does not establish upstream access.
 - **Temporary provider error:** wait for OmniRoute's cooldown or use another browser provider in the fallback order.
 
-For optional Windows sign-in startup, inspect and run `scripts/install-startup.ps1`. It installs a shortcut for the hidden bridge launcher. Startup registration is not part of `npm start` or the tests.
+Embedded setup manages the existing OmniRoute startup entry. The older `scripts/install-startup.ps1` is for standalone bridge deployments only; do not install it alongside embedded mode. Tests never register startup entries or edit the real OmniRoute environment.
 
 ## Development and verification
 
