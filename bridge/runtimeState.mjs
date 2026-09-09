@@ -10,7 +10,7 @@ const exec = promisify(execFile);
 export function dataDirectory() {
   return process.env.OMNI_SYNC_DATA_DIR || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'OmniRouteSessionSync');
 }
-export async function loadState(directory = dataDirectory()) {
+export async function secureDirectory(directory) {
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   if (process.platform === 'win32') {
     // Node's POSIX mode bits do not enforce Windows ACLs. Protect before writing secrets.
@@ -20,6 +20,9 @@ export async function loadState(directory = dataDirectory()) {
     if (!sid) throw new BridgeError('STATE_PERMISSIONS', 'Could not determine the current Windows user', 500);
     await exec(path.join(system, 'System32', 'icacls.exe'), [directory, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true });
   }
+}
+export async function loadState(directory = dataDirectory()) {
+  await secureDirectory(directory);
   const filename = path.join(directory, 'state.json');
   let state;
   try { state = JSON.parse(await fs.readFile(filename, 'utf8')); }
