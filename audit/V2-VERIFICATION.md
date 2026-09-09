@@ -23,8 +23,8 @@ Additional tests cover concurrent pairing-code redemption, old-profile writes du
 
 ## Automated results
 
-- **54 tests passed**, zero failures, cancellations or skips.
-- Syntax checks for 24 JavaScript files and extension asset checks passed.
+- The initial v2 run passed **54 tests**; subsequent startup and recovery results are recorded below.
+- Initial syntax checks covered 24 JavaScript files and extension assets; later checks include the added startup utilities.
 - `npm audit`: zero vulnerabilities; no runtime package dependencies.
 - `git diff --check`: passed.
 - Private bridge state uses an atomic file replacement and survived a restart test; corrupt state was rejected without resetting authentication.
@@ -46,7 +46,7 @@ The synthetic popup passed **26 checks** in a real Playwright browser at a 420px
 
 ## Remaining live verification
 
-Chrome extension management was blocked by browser security policy, so the user must reload version 2.0.0, pair it, and choose the intended ChatGPT connection in Chrome. At the last check the bridge was not yet paired. Automatic cookie delivery from that profile and a natural provider-cookie rotation have therefore **not** been observed live.
+The initial Chrome reload/pairing was user-controlled because extension management was blocked by browser security policy. The subsequent reboot investigation confirmed a paired browser, four account mappings, and further accepted cookie updates after service recovery. That initial setup is complete. A deliberately induced provider-cookie rotation has not been tested.
 
 The successful combo request used its ChatGPT target. A forced live failure followed by another provider succeeding was not performed; the saved priority configuration and browser-provider restrictions were verified. Web sessions can still expire or be revoked, and upstream restrictions may require signing in again.
 
@@ -65,3 +65,26 @@ The installer preserved the existing OmniRoute environment settings, added only 
 Live verification launched the actual Windows startup entry after one controlled restart. Both API port 20128 and sync port 20129 belonged to the same process; sync health reported `lifecycle: omniroute` and `ready: true`, and OmniRoute health reported healthy. A repeated launch returned `alreadyRunning: true` without changing the listener PID. Cloud sync remained false and the existing browser-only priority combo was unchanged. A live request returned HTTP 200 and PONG from gpt-5.5 in about 22.8 seconds, using OmniRoute's existing credentials.
 
 The suite now has **61 passing tests**, with syntax checks covering 30 JavaScript files. Chrome's documented `background` permission was added to support operation without an open browser window. The updated extension must still be loaded and paired once in the user's signed-in Chrome profile; that live cookie handoff remains unverified. Explicitly quitting Chrome stops browser-side work until Chrome starts again. No laptop reboot was performed; the configured startup entry itself was executed and checked.
+
+## Follow-up: actual reboot failure and Windows storage redirection
+
+The user rebooted and neither local service was running. The saved browser pairing and mappings still existed in the agent's filesystem view. A diagnostic launched by Windows Task Scheduler outside Codex then returned `ENOENT` for the same apparent `AppData\Local\OmniRouteSessionSync\installation.json` path and could not see the VBS launcher. The visible state inside Codex matched the physical file under `Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\OmniRouteSessionSync`. Packaged-app AppData redirection made the earlier terminal-based startup check insufficient.
+
+Windows state now lives at `%USERPROFILE%\.omniroute\session-sync`, outside redirected AppData. The installer copied the observed paired v2 state into the empty destination, retained the source as a backup, and preserved all authentication tokens, selected account IDs and fallback settings. A native Windows task subsequently read the new installation and state, wrote diagnostics, and detected the same recovery process as the Codex terminal. The installer refuses to overwrite an existing destination state during migration.
+
+The enabled **OmniRoute Session Sync** Windows task starts 20 seconds after this user's sign-in, permits battery operation, has no execution time limit, and requests restart after failure. Its hidden launcher pins the shared state directory and waits for the recovery service. The recovery service prevents duplicate launches, distinguishes open ports from ready services, retries stopped CLI processes with backoff, and records only process/status information and fixed error categories. A transient Windows file lock while replacing diagnostic status is retried and cannot terminate a healthy gateway.
+
+Live results:
+
+- The actual Windows task started at **13:34:19 UTC** and both services were ready at **13:35:23 UTC**. Ports 20128 and 20129 belonged to the same gateway process, PID 33156, with the recovery process owned by the task's WScript process.
+- Authentication tokens, browser pairing, mappings and fallback settings matched the pre-migration fingerprint checks.
+- Chrome delivered an additional Gemini session update after the task launch; no agent-issued cookie sync was used for that update.
+- The mapped ChatGPT `main` connection passed validation (`valid: true`). Cloud Sync was still `false`.
+- A repeat immediate-start command reported `alreadyRunning: true` and the same gateway PID. Installer dry run reported `changed: false`.
+- The **OmniRoute - Start and Sync** desktop shortcut was created and executed successfully. The existing pairing shortcut now uses the shared state directory.
+
+Automated regressions cover readiness before success, failure during startup, recovery after a later crash, duplicate prevention during initialization, occupied unhealthy ports, secret-free diagnostics, preserved pairing state, and a stable Windows state directory across different AppData contexts. These fixtures do not touch live provider cookies or register Windows tasks.
+
+The final `npm run verify` passed **66 tests** and syntax/asset checks for **32 JavaScript files**. The temporary Windows diagnostic task was removed. Tool policy blocked optional removal of the temporary diagnostic files; they remain in the local private state backup area and ignored `artifacts` directory.
+
+The corrected task was launched and verified directly from Windows Task Scheduler. Another full laptop reboot has not been performed. Cold initialization takes time, and provider revocation or an explicit Chrome exit remains outside cookie synchronization's control.
