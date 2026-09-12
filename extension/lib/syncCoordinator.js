@@ -170,10 +170,13 @@ export function createSyncCoordinator({
       if (assigningAck) entry.ack = null;
       const safe = safeError(error, cookie);
       entry.pending = true;
-      entry.phase = 'error';
-      entry.message = safe.message;
+      const gatewayUnavailable = ['GATEWAY_UNAVAILABLE', 'GATEWAY_ERROR', 'BRIDGE_TIMEOUT', 'BRIDGE_OFFLINE', 'STATUS_UNAVAILABLE'].includes(safe.code);
+      entry.phase = gatewayUnavailable ? 'pending' : 'error';
+      entry.message = gatewayUnavailable
+        ? 'OmniRoute is temporarily unavailable. The current browser session is queued and will retry automatically.'
+        : safe.message;
       try { await persist(); } catch { /* Keep the in-memory retry marker if storage is temporarily unavailable. */ }
-      return { provider, success: false, attempted: true, skipped: false, phase: 'error', error: safe };
+      return { provider, success: false, attempted: true, skipped: false, phase: entry.phase, error: safe };
     }
   }
 

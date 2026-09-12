@@ -3,7 +3,9 @@ export const PROVIDERS = Object.freeze({
   'chatgpt-web': { name: 'ChatGPT Web', url: 'https://chatgpt.com/', domains: ['chatgpt.com', 'openai.com'] },
   'gemini-web': { name: 'Gemini Web', url: 'https://gemini.google.com/', domains: ['google.com'] },
   'zai-web': { name: 'Z.ai Web', url: 'https://chat.z.ai/', domains: ['z.ai'] },
-  'qwen-web': { name: 'Qwen Web', url: 'https://chat.qwen.ai/', domains: ['qwen.ai'] },
+  // Qwen moved its main web application to the apex domain. Keep the legacy
+  // host because existing sessions may still have supporting cookies there.
+  'qwen-web': { name: 'Qwen Web', url: 'https://qwen.ai/', urls: ['https://qwen.ai/', 'https://chat.qwen.ai/'], domains: ['qwen.ai'] },
   'grok-web': { name: 'Grok Web', url: 'https://grok.com/', domains: ['grok.com'] },
   'deepseek-web': { name: 'DeepSeek Web', url: 'https://chat.deepseek.com/', domains: ['deepseek.com'] },
 });
@@ -60,7 +62,10 @@ export function validCredential(provider, value) {
 export async function extractForProvider(provider, readCookies = url => chrome.cookies.getAll({ url })) {
   const meta = PROVIDERS[provider];
   if (!meta) throw new Error('Unsupported browser provider');
-  const cookies = await readCookies(meta.url);
+  const urls = Array.isArray(meta.urls) && meta.urls.length ? meta.urls : [meta.url];
+  const reads = await Promise.allSettled(urls.map(url => readCookies(url)));
+  const cookies = reads.flatMap(result => result.status === 'fulfilled' && Array.isArray(result.value) ? result.value : []);
+  if (!cookies.length && reads.every(result => result.status === 'rejected')) throw new Error('Unable to read browser cookies');
   const map = cookieMap(cookies);
   let cookieValue = '';
   if (provider === 'chatgpt-web') cookieValue = sessionToken(map);

@@ -167,13 +167,19 @@ async function getStatus() {
   try {
     const health = await request('/health');
     if (pairingToken) {
-      gateway = await request('/api/status');
-      bridge = {
-        ready: health.ready === true && gateway.bridge?.ready === true,
-        ...(!(health.ready === true && gateway.bridge?.ready === true) ? {
-          error: cleanText(typeof gateway.bridge?.error === 'string' ? gateway.bridge.error : gateway.bridge?.error?.message, [], 'The bridge cannot reach a ready OmniRoute instance.')
-        } : {})
-      };
+      const alive = health.alive === true || health.ready === true;
+      try { gateway = await request('/api/status'); }
+      catch (error) {
+        bridge = { ready: alive, gatewayReady: false,
+          ...(alive ? { error: publicError(error).message } : {}) };
+      }
+      if (gateway) {
+        const gatewayReady = gateway.bridge?.ready === true;
+        bridge = { ready: alive, gatewayReady,
+          ...(!gatewayReady ? {
+            error: cleanText(typeof gateway.bridge?.error === 'string' ? gateway.bridge.error : gateway.bridge?.error?.message, [], 'OmniRoute is temporarily unavailable. Pending sessions will retry automatically.')
+          } : {}) };
+      }
     } else {
       bridge = { ready: false, error: 'Pair this browser with the local bridge.' };
     }
@@ -188,8 +194,8 @@ async function getStatus() {
     for (const row of next.providers) providerMap.set(row.provider, row);
     await saveCache({
       providers: [...providerMap.values()],
-      models: bridge.ready || next.models.length ? next.models : cached.models,
-      fallback: bridge.ready || next.fallback.saved ? next.fallback : cached.fallback
+      models: bridge.gatewayReady || next.models.length ? next.models : cached.models,
+      fallback: bridge.gatewayReady || next.fallback.saved ? next.fallback : cached.fallback
     });
   }
   const local = await coordinator.getLocalStatus();

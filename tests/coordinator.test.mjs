@@ -44,6 +44,7 @@ function fixture() {
   let validationMessage = '';
   let storageFailure = false;
   let stale = false;
+  let gatewayUnavailable = false;
   const storage = {
     async get(key) { return { [key]: copy(data[key]) }; },
     async set(values) {
@@ -52,7 +53,10 @@ function fixture() {
     }
   };
   async function request(path, options = {}) {
-    if (path === '/api/needed') return { success: true, providers: copy([...rows.values()]) };
+    if (path === '/api/needed') {
+      if (gatewayUnavailable) throw Object.assign(new Error('Gateway unavailable'), { code: 'GATEWAY_UNAVAILABLE' });
+      return { success: true, providers: copy([...rows.values()]) };
+    }
     const body = options.body;
     if (path === '/api/mappings') {
       rows.get(body.provider).connectionId = body.connectionId;
@@ -104,6 +108,7 @@ function fixture() {
     rejectValidation: () => { validation = false; },
     validationResult: (phase, message) => { validation = false; validationPhase = phase; validationMessage = message; },
     staleNext: () => { stale = true; },
+    gatewayUnavailable: value => { gatewayUnavailable = value; },
     maxActive: () => maxActive,
     advance(ms) {
       time += ms;
@@ -180,6 +185,20 @@ test('worker restart recovers durable pending work and reads fresh credentials',
   assert.equal(f.data[COORDINATOR_STORAGE_KEY].providers[CHAT].pending, false);
   assert.equal(JSON.stringify(f.data).includes('session-after-restart'), false);
   restarted.dispose();
+});
+
+test('gateway outage leaves the browser session queued for retry', async () => {
+  const f = fixture();
+  const sync = f.coordinator();
+  f.gatewayUnavailable(true);
+  const unavailable = await sync.syncProvider(CHAT);
+  assert.equal(unavailable.success, false);
+  assert.equal(unavailable.phase, 'pending');
+  assert.equal(f.writes.length, 0);
+  assert.equal((await sync.getLocalStatus())[CHAT].pending, true);
+  f.gatewayUnavailable(false);
+  assert.equal((await sync.syncProvider(CHAT)).success, true);
+  sync.dispose();
 });
 
 test('acknowledgments survive restart but an unavailable gateway row keeps retry state', async () => {
@@ -379,7 +398,7 @@ test('worker popup contract stays secret-free, retains offline mappings, and rep
       const body = options.body ? JSON.parse(options.body) : null;
       calls.push({ path, body });
       const reply = (value, status = 200) => new Response(JSON.stringify(value), { status });
-      if (path === '/health') return reply({ service: 'omniroute-session-sync', version: '2.0.0', ready: true, paired: Boolean(token) });
+      if (path === '/health') return reply({ service: 'omniroute-session-sync', version: '2.0.0', alive: true, ready: true, gatewayReady: true, paired: Boolean(token) });
       if (path === '/api/pair') { assert.equal(body.code, 'once'); token = 'synthetic-private-pairing-token'; rows = []; return reply({ success: true, token }); }
       assert.equal(options.headers.Authorization, 'Bearer ' + token);
       if (expired) return reply({ success: false, error: { code: 'UNAUTHORIZED', message: 'Expired ' + token } }, 401);
@@ -426,7 +445,8 @@ test('worker popup contract stays secret-free, retains offline mappings, and rep
     assert.equal((await send({ action: 'SAVE_FALLBACK', models: ['chatgpt-web/model-one'] })).success, true);
     offline = true;
     status = await send({ action: 'GET_STATUS' });
-    assert.equal(status.bridge.ready, false);
+      assert.equal(status.bridge.ready, true);
+      assert.equal(status.bridge.gatewayReady, false);
     assert.equal(status.providers[0].connectionId, 'mapped');
     assert.equal(status.models.length, 1);
     assert.equal(status.fallback.saved, true);

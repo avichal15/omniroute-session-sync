@@ -24,6 +24,14 @@ test('Qwen sends one canonical cookie header without duplicate parent cookies', 
   ]}));
   assert.equal(result.cookieValue,'cna=waf; token=auth');
 });
+test('Qwen reads a host-only session from the current qwen.ai application', async () => {
+  const result=await extractForProvider('qwen-web',jar({
+    'https://qwen.ai/':[{name:'token',value:'root-auth',domain:'qwen.ai',path:'/'}],
+    'https://chat.qwen.ai/':[{name:'cna',value:'legacy-waf',domain:'.qwen.ai',path:'/'}],
+  }));
+  assert.equal(result.hasCredentials,true);
+  assert.equal(result.cookieValue,'cna=legacy-waf; token=root-auth');
+});
 test('event matching uses domain boundaries and relevant supporting cookies',()=>{
   assert.equal(matchCookieProvider('.chatgpt.com','__Secure-next-auth.session-token.7'),'chatgpt-web');
   assert.equal(matchCookieProvider('notchatgpt.com','__Secure-next-auth.session-token'),null);

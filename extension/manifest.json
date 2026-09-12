@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OmniRoute Session Sync",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Pair Chrome with a local bridge to sync mapped browser sessions and manage an OmniRoute fallback.",
   "minimum_chrome_version": "120",
   "incognito": "not_allowed",
@@ -16,6 +16,7 @@
     "https://*.openai.com/*",
     "https://*.google.com/*",
     "https://*.z.ai/*",
+    "https://qwen.ai/*",
     "https://*.qwen.ai/*",
     "https://*.deepseek.com/*",
     "https://*.grok.com/*",

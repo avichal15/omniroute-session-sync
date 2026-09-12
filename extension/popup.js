@@ -323,11 +323,12 @@ document.addEventListener('DOMContentLoaded', () => {
     state.available = true;
     state.needsReload = false;
     const paired = status.paired === true;
+    const gatewayReady = status.bridge?.gatewayReady !== false;
     ui.pairingSection.hidden = paired;
     ui.pairedContent.hidden = !paired;
-    text(ui.bridgeStatusBadge, paired ? (status.bridge?.ready ? 'Bridge ready' : 'Bridge offline') : 'Not paired');
-    ui.bridgeStatusBadge.dataset.state = paired && status.bridge?.ready ? 'online' : paired ? 'error' : '';
-    feedback(ui.statusNotice, !paired ? 'Pair once to connect this extension to your local bridge.' : status.bridge?.ready ? 'Paired locally. Status refreshes every 5 seconds while open.' : messageOf(status.bridge?.error, 'The local bridge is unavailable. Start it, then Refresh.'), paired && !status.bridge?.ready ? 'error' : '');
+    text(ui.bridgeStatusBadge, !paired ? 'Not paired' : !status.bridge?.ready ? 'Bridge offline' : gatewayReady ? 'Bridge ready' : 'OmniRoute recovering');
+    ui.bridgeStatusBadge.dataset.state = paired && status.bridge?.ready ? (gatewayReady ? 'online' : 'pending') : paired ? 'error' : '';
+    feedback(ui.statusNotice, !paired ? 'Pair once to connect this extension to your local bridge.' : !status.bridge?.ready ? messageOf(status.bridge?.error, 'The local bridge is unavailable. Start it, then Refresh.') : !gatewayReady ? 'Local bridge is online. OmniRoute is temporarily unavailable; pending sessions will retry automatically.' : 'Paired locally. Status refreshes every 5 seconds while open.', paired && !status.bridge?.ready ? 'error' : !gatewayReady ? 'pending' : '');
     const providers = Array.isArray(status.providers) ? status.providers : [];
     state.providers = new Map(providers.filter(provider => BROWSER_PROVIDERS.has(provider?.provider)).map(provider => [provider.provider, provider]));
     const models = Array.isArray(status.models) ? status.models : [];
