@@ -30,8 +30,8 @@ This is a **one-time setup per Chrome profile**. Pairing, account mappings, and 
    ```powershell
    npm run setup:embedded
    ```
-   This configures OmniRoute's `.env` with a main-thread `--import` preload and installs the **OmniRoute Session Sync** Windows Task Scheduler task. It starts silently 20 seconds after this user's Windows sign-in, works on battery, and requires no stored Windows password. A recovery service starts OmniRoute, checks both local services, and retries when the CLI stops. The task restarts the recovery service if that process fails. Prior environment files and startup scripts are backed up to `%USERPROFILE%\.omniroute\session-sync\backups`; the old Startup-folder VBS is removed only after the replacement task is verified.
-   If OmniRoute is already running when you install, restart its CLI supervisor once to load the preload. The sync listener then runs inside the same process as OmniRoute. Future starts reuse the saved setup automatically.
+   This installs the **OmniRoute Session Sync** Windows Task Scheduler task. It starts silently 20 seconds after this user's Windows sign-in, works on battery, and requires no stored Windows password. The recovery service starts a local bridge process before OmniRoute, monitors both services independently, and retries either one if it stops. Prior environment files and startup scripts are backed up to `%USERPROFILE%\.omniroute\session-sync\backups`; the old Startup-folder VBS is removed only after the replacement task is verified.
+   The bridge uses OmniRoute's authenticated local management API, but does not share OmniRoute's event loop. A busy or recovering gateway therefore leaves Chrome's local sync channel available and queues its next retry.
    To start OmniRoute with Session Sync immediately:
    ```powershell
    npm run start:integrated
@@ -56,7 +56,7 @@ This is a **one-time setup per Chrome profile**. Pairing, account mappings, and 
 
    The command verifies management access before saving the key in the bridge's private local state. This key is separate from your application's inference key. `OMNIROUTE_MANAGEMENT_TOKEN` is also supported for process-managed configuration.
 
-4. Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select this project's `extension` directory. If already installed, click **Reload** and check that the version is **2.0.0**.
+4. Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select this project's `extension` directory. If already installed, click **Reload** and check that the version is **2.0.1**. Reloading keeps this profile's pairing and mappings; do not pair again unless the popup explicitly says it is unpaired.
 5. In a second terminal, generate a pairing code:
 
    ```powershell
@@ -70,7 +70,7 @@ This is a **one-time setup per Chrome profile**. Pairing, account mappings, and 
 
 The bridge configuration is `bridge/config.json`. Both addresses must stay on loopback. The extension's bridge address is fixed to port 20129; changing that port also requires updating the extension's worker address and host permissions.
 
-Keep this project directory in place: the installed preload and unpacked Chrome extension use its files. Do not run standalone and embedded sync on the same port.
+Keep this project directory in place: the Windows task and unpacked Chrome extension use its files. Do not run an additional standalone bridge on port 20129.
 
 ## Model fallback
 
@@ -94,6 +94,8 @@ Fallback behavior, cooldowns, account selection within a provider, and which fai
 - Chrome startup and a one-minute alarm reconcile mapped sessions. Chrome must be running and able to wake the extension worker; timer timing is subject to Chrome and OS scheduling.
 - The extension requests Chrome's `background` permission so Chrome can start at computer login and remain running after its last window closes. Explicitly quitting Chrome, or disabling its background operation, stops browser-side work until Chrome starts again. See [Chrome's permission documentation](https://developer.chrome.com/docs/extensions/reference/permissions-list#background).
 - Failed updates remain pending and retry with the latest cookies. Successful acknowledgements are tied to the selected connection and bridge revision, so a failed write cannot suppress a later retry.
+- When the local bridge is online but OmniRoute is recovering, the popup shows **OmniRoute recovering**. It keeps the current browser session queued for the next automatic retry instead of treating the bridge as offline.
+- Qwen Web checks both `qwen.ai` and the legacy `chat.qwen.ai` host. This covers host-only Qwen login cookies issued by the current site.
 - Cookie values are sent only to the paired local bridge. The bridge authenticates, checks the mapping and local-only setting, and calls `PUT /api/providers/:id` on OmniRoute. OmniRoute owns credential encryption and storage.
 - Signing out does not replace a saved connection with empty data. The popup requests a new browser login. Other healthy providers may still serve the fallback route.
 
@@ -119,7 +121,7 @@ The bridge binds to loopback, requires bearer authentication on protected routes
 npm run status
 ```
 
-- **Bridge unavailable:** start OmniRoute with `npm run start:integrated`; check that ports 20128 and 20129 are reachable locally. Restart the CLI supervisor once if embedded setup was installed while it was already running.
+- **Bridge offline:** port 20129 is the independent local bridge. If it is reachable while the popup says **OmniRoute recovering**, Chrome can keep a session queued until port 20128 becomes ready. `npm run status` distinguishes the two services.
 - **Not ready after Windows sign-in:** check `npm run status` and `%USERPROFILE%\.omniroute\session-sync\startup.log`. Task Scheduler should show **OmniRoute Session Sync** enabled and running. Cold initialization can take several minutes; an open port alone does not mean the gateway is ready. The task runs after Windows sign-in, rather than before a user logs in.
 - **Management authentication failed:** configure a current `manage`-scoped key with `npm run configure -- --stdin`.
 - **Pairing expired or invalid:** run `npm run pair` for a new code. If another profile replaced the pairing, pair this profile again and reselect its connections.

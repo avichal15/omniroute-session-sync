@@ -88,3 +88,11 @@ Automated regressions cover readiness before success, failure during startup, re
 The final `npm run verify` passed **66 tests** and syntax/asset checks for **32 JavaScript files**. The temporary Windows diagnostic task was removed. Tool policy blocked optional removal of the temporary diagnostic files; they remain in the local private state backup area and ignored `artifacts` directory.
 
 The corrected task was launched and verified directly from Windows Task Scheduler. Another full laptop reboot has not been performed. Cold initialization takes time, and provider revocation or an explicit Chrome exit remains outside cookie synchronization's control.
+
+## Follow-up: bridge availability and current Qwen host
+
+The prior embedded bridge shared OmniRoute's Node event loop. Runtime evidence showed the gateway process remained alive while its health endpoint repeatedly stopped responding; the embedded bridge stopped responding at the same time. This made the extension report an offline bridge even though the Windows supervisor was still running.
+
+Session Sync now starts a supervised sidecar bridge before OmniRoute. Port 20129 belongs to that bridge process and port 20128 belongs to OmniRoute's gateway process. Health now distinguishes local bridge liveness from gateway readiness, and browser updates remain queued during a gateway outage. Synthetic coverage verifies that the bridge remains reachable while the gateway is restarted and that a gateway outage remains pending for retry.
+
+Qwen's current public web application is served at `https://qwen.ai/`; its older host remains `https://chat.qwen.ai/`. Version 2.0.1 reads both hosts so a host-only Qwen authentication cookie can be discovered. The updated unpacked extension must be reloaded once in Chrome; the existing pairing is retained.
