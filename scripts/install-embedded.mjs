@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { dataDirectory, secureDirectory } from '../bridge/runtimeState.mjs';
-import { updateNodeOptions, startupVbs } from './embedded-install-lib.mjs';
+import { removeNodeOptions, startupVbs } from './embedded-install-lib.mjs';
 
 const exec = promisify(execFile);
 async function readOptional(filename) {
@@ -27,14 +27,15 @@ export async function installEmbedded({ dryRun = false, migrateFrom } = {}) {
   const pkg = JSON.parse(await fs.readFile(path.join(omniInstallDir, 'package.json'), 'utf8'));
   if (pkg.name !== 'omniroute') throw new Error('The configured installation is not OmniRoute.');
   const cliPath = path.join(omniInstallDir, 'bin', 'omniroute.mjs');
+  const bridgePath = path.join(projectDir, 'bridge', 'server.mjs');
   const launcherPath = path.join(projectDir, 'scripts', 'start-integrated.mjs');
   const preload = pathToFileURL(path.join(projectDir, 'bridge', 'omniroute-preload.mjs')).href;
-  await fs.access(cliPath); await fs.access(launcherPath);
+  await fs.access(cliPath); await fs.access(bridgePath); await fs.access(launcherPath);
   const { resolveDataDir } = await import(pathToFileURL(path.join(omniInstallDir, 'bin', 'cli', 'data-dir.mjs')).href);
   const omniDataDir = resolveDataDir();
   const envFile = path.join(omniDataDir, '.env');
   const previousEnv = await readOptional(envFile);
-  const updatedEnv = updateNodeOptions(previousEnv || '', preload);
+  const updatedEnv = removeNodeOptions(previousEnv || '', preload);
   const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const { stdout } = await exec(powershell, ['-NoProfile', '-NonInteractive', '-Command', '[Environment]::GetFolderPath("Startup")'], { windowsHide: true });
   const startupDir = stdout.trim();
@@ -73,15 +74,15 @@ export async function installEmbedded({ dryRun = false, migrateFrom } = {}) {
   const recordFile = path.join(directory, 'installation.json');
   const priorRecord = JSON.parse(await readOptional(recordFile)
     || (path.resolve(legacyDirectory) !== path.resolve(directory) ? await readOptional(path.join(legacyDirectory, 'installation.json')) : null) || 'null');
-  const record = { version: 1, projectDir, omniInstallDir, omniDataDir, envFile, cliPath,
-    nodePath: process.execPath, preload, startupPath, launcherPath,
+  const record = { version: 1, projectDir, omniInstallDir, omniDataDir, envFile, cliPath, bridgePath,
+    nodePath: process.execPath, preload, startupPath, launcherPath, lifecycle: 'supervised-sidecar',
     startupType: 'scheduled-task', startupTaskName,
     previousStartupPath: priorRecord?.previousStartupPath || legacyStartup?.filename || null,
     serveArgs: priorRecord?.serveArgs || ['serve', '--no-open', ...(/--tray\b/.test(legacyStartup?.content || '') ? ['--tray'] : [])] };
   const changed = oldState !== null || previousEnv !== updatedEnv || previousStartup !== startupSource || Boolean(legacyStartup) || !task.matches
     || Object.entries(record).some(([key, value]) => JSON.stringify(priorRecord?.[key]) !== JSON.stringify(value));
-  const summary = { success: true, changed, envFile, stateDirectory: directory, startupPath, startupTaskName, preload,
-    importsSavedPairing: oldState !== null, lifecycle: 'omniroute' };
+  const summary = { success: true, changed, envFile, stateDirectory: directory, startupPath, startupTaskName,
+    importsSavedPairing: oldState !== null, lifecycle: 'supervised-sidecar' };
   if (dryRun) return { ...summary, dryRun: true };
   await secureDirectory(directory);
   if (changed) {

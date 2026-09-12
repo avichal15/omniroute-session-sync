@@ -86,7 +86,7 @@ test('embedded host restart retains pairing, account mapping and automatic sync 
       try {
         const response = await fetch(base + '/health');
         const health = await response.json();
-        if (response.ok && health.ready) return health;
+        if (response.ok && health.alive === true) return health;
       } catch {}
       await new Promise(resolve => setTimeout(resolve, 100));
     }

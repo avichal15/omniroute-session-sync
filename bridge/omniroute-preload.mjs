@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import net from 'node:net';
 import { isMainThread } from 'node:worker_threads';
 import { main } from './server.mjs';
 
@@ -16,11 +17,26 @@ export async function isOmniRouteServer(scriptPath) {
   } catch { return false; }
 }
 
+async function sidecarListening() {
+  try {
+    const configPath = process.env.OMNI_SYNC_CONFIG_FILE || new URL('./config.json', import.meta.url);
+    const config = JSON.parse(await fs.readFile(configPath, 'utf8'));
+    if (config.host !== '127.0.0.1' || !Number.isInteger(config.port)) return false;
+    return await new Promise(resolve => {
+      const socket = net.createConnection({ host: config.host, port: config.port });
+      const finish = value => { socket.destroy(); resolve(value); };
+      socket.setTimeout(1000, () => finish(false));
+      socket.once('connect', () => finish(true));
+      socket.once('error', () => finish(false));
+    });
+  } catch { return false; }
+}
+
 if (isMainThread && await isOmniRouteServer(process.argv[1])) {
   try {
-    // Bind before OmniRoute's entrypoint patches http.createServer for WebDAV/TLS.
-    // Awaiting here also makes startup order deterministic without another daemon.
-    await main({ lifecycle: 'omniroute' });
+    // A supervised sidecar owns the port when launched by Session Sync v2. Keep
+    // this fallback for older installations and manual OmniRoute launches.
+    if (!await sidecarListening()) await main({ lifecycle: 'omniroute' });
   } catch (error) {
     const reason = error?.code === 'EADDRINUSE'
       ? 'the sync port is already in use'

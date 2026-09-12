@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { dataDirectory, secureDirectory } from '../bridge/runtimeState.mjs';
 import { loopbackUrl } from '../bridge/omniClient.mjs';
-import { addPreload, readNodeOptions } from './embedded-install-lib.mjs';
+import { readNodeOptions, removePreload } from './embedded-install-lib.mjs';
 
 const exec = promisify(execFile);
 const STARTUP_CODES = ['ERR_MODULE_NOT_FOUND', 'ERR_REQUIRE_ESM', 'ERR_UNSUPPORTED_ESM_URL_SCHEME',
@@ -20,11 +20,14 @@ export async function readInstallation(directory = dataDirectory()) {
     .every(value => typeof value === 'string' && path.isAbsolute(value))
     || !Array.isArray(record.serveArgs) || record.serveArgs.some(value => typeof value !== 'string' || /[\0\r\n]/.test(value)))
     throw new Error('Run the one-time embedded setup before launching.');
+  const bridgePath = typeof record.bridgePath === 'string' && path.isAbsolute(record.bridgePath)
+    ? record.bridgePath : path.join(record.projectDir, 'bridge', 'server.mjs');
+  await fs.access(bridgePath);
   const configPath = path.join(record.projectDir, 'bridge', 'config.json');
   const config = JSON.parse(await fs.readFile(configPath, 'utf8'));
   const gateway = new URL(loopbackUrl(config.omnirouteBaseUrl));
   const sync = new URL(loopbackUrl(`http://${config.host}:${config.port}`));
-  return { record, configPath, directory: path.resolve(directory), gateway, sync };
+  return { record: { ...record, bridgePath }, configPath, directory: path.resolve(directory), gateway, sync };
 }
 
 function instanceAddress(directory) {
@@ -72,8 +75,10 @@ export async function integratedHealth(context, timeoutMs = 3000) {
     probe(new URL('/api/monitoring/health', context.gateway), timeoutMs),
     probe(new URL('/health', context.sync), timeoutMs),
   ]);
-  return { ready: gateway.status === 200 && sync.status === 200 && sync.body?.ready === true
-      && sync.body?.service === 'omniroute-session-sync' && sync.body?.runtime?.lifecycle === 'omniroute',
+  const bridgeAlive = sync.status === 200 && (sync.body?.alive === true || sync.body?.ready === true)
+    && sync.body?.service === 'omniroute-session-sync';
+  return { ready: gateway.status === 200 && bridgeAlive,
+    bridgeAlive,
     gatewayHttp: gateway.status, syncHttp: sync.status,
     syncProcessId: sync.body?.runtime?.processId };
 }
@@ -122,58 +127,88 @@ export async function runSupervisor({ directory = dataDirectory(), signal, pollM
   const release = await acquireInstance(context.directory);
   if (!release) return { success: true, alreadyRunning: true };
   const log = diagnostics(context.directory);
-  let child, exited, retryAt = 0, failures = 0, phase, startedAt;
-  const errorCodes = new Set();
+  const workers = {
+    bridge: { child: undefined, exited: undefined, retryAt: 0, failures: 0, startedAt: 0, errorCodes: new Set() },
+    gateway: { child: undefined, exited: undefined, retryAt: 0, failures: 0, startedAt: 0, errorCodes: new Set() },
+  };
+  let phase;
+  const endpointOpen = url => connected({
+    host: url.hostname.replace(/^\[|\]$/g, ''),
+    port: Number(url.port || (url.protocol === 'https:' ? 443 : 80)),
+  });
+  const retry = worker => {
+    worker.retryAt = Date.now() + Math.min(retryMs * 2 ** Math.min(worker.failures++, 4), 60000);
+  };
+  const environment = async lifecycle => {
+    const { record } = context;
+    const envOptions = readNodeOptions(await fs.readFile(record.envFile, 'utf8'));
+    const env = { ...process.env, NODE_OPTIONS: removePreload(process.env.NODE_OPTIONS ?? envOptions, record.preload),
+      OMNI_SYNC_DATA_DIR: context.directory, OMNI_SYNC_CONFIG_FILE: context.configPath,
+      DATA_DIR: record.omniDataDir || path.dirname(record.envFile) };
+    const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') || 'PATH';
+    env[pathKey] = path.dirname(record.nodePath) + path.delimiter + (env[pathKey] || '');
+    if (lifecycle) env.OMNI_SYNC_LIFECYCLE = lifecycle;
+    return env;
+  };
+  const startWorker = async (name, endpoint, args, cwd, lifecycle) => {
+    const worker = workers[name];
+    if (worker.child || Date.now() < worker.retryAt || await endpointOpen(endpoint)) return;
+    try {
+      const child = spawn(context.record.nodePath, args, {
+        cwd, env: await environment(lifecycle), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      worker.child = child;
+      child.once('exit', (code, childSignal) => { worker.exited = { code, signal: childSignal }; });
+      child.once('error', error => { worker.exited = { code: null, signal: null, errorCode: error?.code }; });
+      const classify = data => {
+        const text = data.toString();
+        for (const code of STARTUP_CODES) if (text.includes(code)) worker.errorCodes.add(code);
+      };
+      child.stdout.on('data', classify); child.stderr.on('data', classify);
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      worker.startedAt = Date.now();
+      await log({ event: `${name}-started`, childPid: child.pid });
+    } catch (error) {
+      await log({ event: `${name}-launch-failed`, code: STARTUP_CODES.includes(error.code) ? error.code : 'STARTUP_CONFIGURATION' });
+      worker.child = undefined; worker.exited = undefined; retry(worker);
+    }
+  };
+  const handleExit = async name => {
+    const worker = workers[name];
+    if (!worker.exited) return;
+    await log({ event: `${name}-exited`, childPid: worker.child?.pid, code: worker.exited.code,
+      signal: worker.exited.signal, ...(worker.exited.errorCode ? { errorCode: worker.exited.errorCode } : {}) });
+    if (Date.now() - worker.startedAt > 60000) worker.failures = 0;
+    worker.child = undefined; worker.exited = undefined; retry(worker);
+  };
   try {
     await log({ event: 'supervisor-started', processId: process.pid });
     while (!signal?.aborted) {
-      if (exited) {
-        await log({ event: 'gateway-exited', childPid: child?.pid, code: exited.code, signal: exited.signal });
-        if (Date.now() - startedAt > 60000) failures = 0;
-        retryAt = Date.now() + Math.min(retryMs * 2 ** Math.min(failures++, 4), 60000);
-        child = undefined; exited = undefined;
-      }
-      if (!child && Date.now() >= retryAt && !await connected({ host: context.gateway.hostname.replace(/^\[|\]$/g, ''), port: Number(context.gateway.port || (context.gateway.protocol === 'https:' ? 443 : 80)) })) {
-        const { record } = context;
-        try {
-          const envOptions = readNodeOptions(await fs.readFile(record.envFile, 'utf8'));
-          const env = { ...process.env, NODE_OPTIONS: addPreload(process.env.NODE_OPTIONS ?? envOptions, record.preload),
-            OMNI_SYNC_DATA_DIR: context.directory, OMNI_SYNC_CONFIG_FILE: context.configPath,
-            DATA_DIR: record.omniDataDir || path.dirname(record.envFile) };
-          const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') || 'PATH';
-          env[pathKey] = path.dirname(record.nodePath) + path.delimiter + (env[pathKey] || '');
-          child = spawn(record.nodePath, [record.cliPath, ...record.serveArgs], {
-            cwd: record.omniInstallDir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-          });
-          child.once('exit', (code, childSignal) => { exited = { code, signal: childSignal }; });
-          // Drain output; only fixed diagnostic categories can reach the log.
-          const classify = data => {
-            const text = data.toString();
-            for (const code of STARTUP_CODES) if (text.includes(code)) errorCodes.add(code);
-          };
-          child.stdout.on('data', classify); child.stderr.on('data', classify);
-          await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-          startedAt = Date.now();
-          await log({ event: 'gateway-started', childPid: child.pid });
-        } catch (error) {
-          await log({ event: 'launch-failed', code: STARTUP_CODES.includes(error.code) ? error.code : 'STARTUP_CONFIGURATION' });
-          child = undefined; exited = undefined;
-          retryAt = Date.now() + Math.min(retryMs * 2 ** Math.min(failures++, 4), 60000);
-        }
-      }
+      await handleExit('bridge');
+      await handleExit('gateway');
+      await startWorker('bridge', context.sync, [context.record.bridgePath], context.record.projectDir, 'sidecar');
+      await startWorker('gateway', context.gateway, [context.record.cliPath, ...context.record.serveArgs], context.record.omniInstallDir);
       const health = await integratedHealth(context);
-      const nextPhase = health.ready ? 'ready' : child ? 'starting' : Date.now() < retryAt ? 'retrying' : 'waiting-for-gateway';
-      if (nextPhase !== phase || errorCodes.size) {
-        await log({ event: 'health', phase: nextPhase, gatewayHttp: health.gatewayHttp, syncHttp: health.syncHttp, errorCodes: [...errorCodes] });
-        phase = nextPhase; errorCodes.clear();
+      const retrying = Object.values(workers).some(worker => Date.now() < worker.retryAt);
+      const nextPhase = health.ready ? 'ready'
+        : health.bridgeAlive ? 'gateway-unavailable'
+        : health.gatewayHttp === 200 ? 'bridge-unavailable'
+        : retrying ? 'retrying' : 'starting';
+      const errorCodes = [...new Set(Object.values(workers).flatMap(worker => [...worker.errorCodes]))];
+      if (nextPhase !== phase || errorCodes.length) {
+        await log({ event: 'health', phase: nextPhase, gatewayHttp: health.gatewayHttp, syncHttp: health.syncHttp, errorCodes });
+        phase = nextPhase;
+        for (const worker of Object.values(workers)) worker.errorCodes.clear();
       }
-      const status = { phase, supervisorPid: process.pid, childPid: child?.pid, ...health, updatedAt: new Date().toISOString() };
+      const status = { phase, supervisorPid: process.pid, childPid: workers.gateway.child?.pid,
+        gatewayPid: workers.gateway.child?.pid, bridgePid: workers.bridge.child?.pid,
+        ...health, updatedAt: new Date().toISOString() };
       try { await saveStatus(context.directory, status); }
       catch { await log({ event: 'status-write-failed', code: 'DIAGNOSTICS_UNAVAILABLE' }); }
       try { await delay(pollMs, undefined, { signal }); } catch (error) { if (!signal?.aborted) throw error; }
     }
   } finally {
-    await stopChild(child);
+    await Promise.all([stopChild(workers.bridge.child), stopChild(workers.gateway.child)]);
     await log({ event: 'supervisor-stopped', processId: process.pid }).catch(() => {});
     await release();
   }

@@ -29,34 +29,48 @@ async function fixture(t, source) {
       await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
-  const reserve = net.createServer();
-  await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
-  const port = reserve.address().port;
-  await new Promise(resolve => reserve.close(resolve));
+  const reservePort = async () => {
+    const reserve = net.createServer();
+    await new Promise(resolve => reserve.listen(0, '127.0.0.1', resolve));
+    const port = reserve.address().port;
+    await new Promise(resolve => reserve.close(resolve));
+    return port;
+  };
+  const gatewayPort = await reservePort();
+  const bridgePort = await reservePort();
   await fs.mkdir(path.join(directory, 'bridge'));
-  await fs.writeFile(path.join(directory, 'bridge', 'config.json'), JSON.stringify({ host: '127.0.0.1', port, omnirouteBaseUrl: `http://127.0.0.1:${port}` }));
+  await fs.writeFile(path.join(directory, 'bridge', 'config.json'), JSON.stringify({ host: '127.0.0.1', port: bridgePort, omnirouteBaseUrl: `http://127.0.0.1:${gatewayPort}` }));
   const hook = path.join(directory, 'hook.mjs'); await fs.writeFile(hook, '');
   const envFile = path.join(directory, '.env'); await fs.writeFile(envFile, 'NODE_OPTIONS=\n');
   const cliPath = path.join(directory, 'cli.mjs');
   const attempts = path.join(directory, 'attempts.jsonl');
+  const bridgeAttempts = path.join(directory, 'bridge-attempts.jsonl');
+  const bridgePath = path.join(directory, 'bridge', 'server.mjs');
+  await fs.writeFile(bridgePath, `import fs from 'node:fs';import http from 'node:http';
+    fs.appendFileSync(${JSON.stringify(bridgeAttempts)},JSON.stringify({pid:process.pid,at:Date.now()})+'\\n');
+    http.createServer((req,res)=>{res.writeHead(200,{'Content-Type':'application/json'});
+      res.end(JSON.stringify({service:'omniroute-session-sync',version:'2.0.0',alive:true,ready:false,runtime:{lifecycle:'standalone',processId:process.pid}}));
+    }).listen(${bridgePort},'127.0.0.1');`);
   const startup = `import fs from 'node:fs';import http from 'node:http';
-    const attempts=${JSON.stringify(attempts)};const port=${port};
+    const attempts=${JSON.stringify(attempts)};const port=${gatewayPort};
     fs.appendFileSync(attempts,JSON.stringify({pid:process.pid,at:Date.now()})+'\\n');
     const count=fs.readFileSync(attempts,'utf8').trim().split('\\n').length;
     ${source}`;
   await fs.writeFile(cliPath, startup);
   await fs.writeFile(path.join(directory, 'installation.json'), JSON.stringify({ version: 1, nodePath: process.execPath,
-    cliPath, projectDir: directory, omniInstallDir: directory, envFile, preload: pathToFileURL(hook).href, serveArgs: ['serve', '--no-open'] }));
+    cliPath, bridgePath, projectDir: directory, omniInstallDir: directory, envFile, preload: pathToFileURL(hook).href, serveArgs: ['serve', '--no-open'] }));
   const readAttempts = async () => (await fs.readFile(attempts, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const readBridgeAttempts = async () => (await fs.readFile(bridgeAttempts, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   const status = async () => JSON.parse(await fs.readFile(path.join(directory, 'startup-status.json'), 'utf8').catch(() => 'null'));
-  return { directory, port, readAttempts, status, start() {
+  const bridgeHealth = async () => fetch(`http://127.0.0.1:${bridgePort}/health`).then(response => response.json());
+  return { directory, gatewayPort, bridgePort, readAttempts, readBridgeAttempts, bridgeHealth, status, start() {
     running = runSupervisor({ directory, signal: controller.signal, pollMs: 40, retryMs: 50 });
     running.catch(error => t.diagnostic('Supervisor fixture error: ' + error.stack));
     return running;
   } };
 }
 const healthyServer = `http.createServer((req,res)=>{res.writeHead(200,{'Content-Type':'application/json'});
-  res.end(JSON.stringify({service:'omniroute-session-sync',ready:true,runtime:{lifecycle:'omniroute',processId:process.pid}}));
+  res.end(JSON.stringify({status:'healthy'}));
 }).listen(port,'127.0.0.1');`;
 
 test('supervisor recovers from startup failure and a later crash without storing console credentials', { timeout: 12000 }, async t => {
@@ -68,8 +82,10 @@ test('supervisor recovers from startup failure and a later crash without storing
   await until(async () => (await f.status())?.ready);
   const firstReady = await f.readAttempts();
   assert.equal(firstReady.length, 2);
+  assert.equal((await f.readBridgeAttempts()).length, 1);
   process.kill(firstReady[1].pid);
   await until(async () => (await f.readAttempts()).length === 3 && (await f.status())?.ready);
+  assert.equal((await f.readBridgeAttempts()).length, 1);
   assert.equal(await fs.readFile(path.join(f.directory, 'state.json'), 'utf8'), savedPairing);
   const log = await fs.readFile(path.join(f.directory, 'startup.log'), 'utf8');
   assert.ok(log.includes('gateway-exited'));
@@ -91,13 +107,25 @@ test('a second supervisor cannot start another CLI while the first gateway initi
 test('an occupied but unhealthy port is not reported ready or overwritten', { timeout: 10000 }, async t => {
   const f = await fixture(t, healthyServer);
   const occupied = http.createServer((req, res) => { res.writeHead(503); res.end('{}'); });
-  await new Promise(resolve => occupied.listen(f.port, '127.0.0.1', resolve));
+  await new Promise(resolve => occupied.listen(f.gatewayPort, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => { occupied.closeAllConnections(); occupied.close(resolve); }));
   f.start();
   await until(() => supervisorRunning(f.directory));
   await assert.rejects(startIntegrated({ directory: f.directory, timeoutMs: 180, pollMs: 20 }), /still starting|needs attention/);
   assert.deepEqual(await f.readAttempts(), []);
   assert.equal(occupied.listening, true);
+});
+
+test('bridge remains reachable while the gateway restarts', { timeout: 10000 }, async t => {
+  const f = await fixture(t, healthyServer);
+  f.start();
+  await until(async () => (await f.status())?.ready);
+  const [gateway] = await f.readAttempts();
+  process.kill(gateway.pid);
+  const health = await f.bridgeHealth();
+  assert.equal(health.alive, true);
+  assert.equal((await f.status())?.bridgeAlive, true);
+  await until(async () => (await f.readAttempts()).length === 2 && (await f.status())?.ready);
 });
 
 test('Windows startup pins the saved data directory and waits for the recovery service', () => {

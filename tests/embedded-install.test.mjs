@@ -7,7 +7,7 @@ import net from 'node:net';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { addPreload, readNodeOptions, updateNodeOptions, startupVbs } from '../scripts/embedded-install-lib.mjs';
+import { addPreload, readNodeOptions, removeNodeOptions, updateNodeOptions, startupVbs } from '../scripts/embedded-install-lib.mjs';
 
 const preload = 'file:///C:/a%20project/bridge/omniroute-preload.mjs';
 
@@ -27,6 +27,12 @@ test('installation adds one preload to a new environment without duplicates', ()
   assert.equal(addPreload('', preload), '--import=' + preload);
 });
 
+test('sidecar installation removes only its own embedded preload', () => {
+  const original = `NODE_OPTIONS="--require=C:/local/hide-windows.cjs --import=${preload} --max-old-space-size=2048"\n`;
+  const updated = removeNodeOptions(original, preload);
+  assert.equal(readNodeOptions(updated), '--require=C:/local/hide-windows.cjs --max-old-space-size=2048');
+});
+
 test('ambiguous environment options are rejected instead of rewriting unrelated data', () => {
   assert.throws(() => updateNodeOptions('NODE_OPTIONS=a\nNODE_OPTIONS=b\n', preload), /multiple NODE_OPTIONS/i);
   assert.throws(() => addPreload('ok\nBAD=value', preload), /single line/i);
@@ -42,7 +48,7 @@ test('Windows startup uses absolute quoted paths and a hidden launch', () => {
   assert.ok(!source.includes('cmd.exe'));
 });
 
-test('hidden launcher starts the CLI with its preload and avoids a duplicate gateway', { timeout: 10000 }, async t => {
+test('hidden launcher starts separate bridge and gateway processes without a duplicate gateway', { timeout: 10000 }, async t => {
   const root = path.resolve(os.tmpdir());
   const directory = await fs.mkdtemp(path.join(root, 'omni-launcher-test-'));
   let pid;
@@ -55,25 +61,34 @@ test('hidden launcher starts the CLI with its preload and avoids a duplicate gat
     assert.ok(path.basename(directory).startsWith('omni-launcher-test-'));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
-  const probe = net.createServer();
-  await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
-  const port = probe.address().port;
-  await new Promise(resolve => probe.close(resolve));
+  const reservePort = async () => {
+    const probe = net.createServer();
+    await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+    const port = probe.address().port;
+    await new Promise(resolve => probe.close(resolve));
+    return port;
+  };
+  const gatewayPort = await reservePort();
+  const bridgePort = await reservePort();
   await fs.mkdir(path.join(directory, 'bridge'));
-  await fs.writeFile(path.join(directory, 'bridge', 'config.json'), JSON.stringify({ host: '127.0.0.1', port, omnirouteBaseUrl: `http://127.0.0.1:${port}` }));
+  await fs.writeFile(path.join(directory, 'bridge', 'config.json'), JSON.stringify({ host: '127.0.0.1', port: bridgePort, omnirouteBaseUrl: `http://127.0.0.1:${gatewayPort}` }));
   const marker = path.join(directory, 'started.json');
   const hook = path.join(directory, 'hook.mjs');
   await fs.writeFile(hook, 'globalThis.embeddedTestPreloaded=true;');
   const cli = path.join(directory, 'cli.mjs');
+  await fs.writeFile(path.join(directory, 'bridge', 'server.mjs'), `import http from 'node:http';
+    http.createServer((req,res)=>{res.writeHead(200,{'Content-Type':'application/json'});
+      res.end(JSON.stringify({service:'omniroute-session-sync',version:'2.0.0',alive:true,ready:false,runtime:{lifecycle:'standalone',processId:process.pid}}));
+    }).listen(${bridgePort},'127.0.0.1');`);
   await fs.writeFile(cli, `import http from 'node:http';import fs from 'node:fs';
     const startedAt=Date.now();
     http.createServer((req,res)=>{const ready=Date.now()-startedAt>250;res.writeHead(ready?200:503,{'Content-Type':'application/json'});
-      res.end(JSON.stringify({service:'omniroute-session-sync',ready,runtime:{lifecycle:'omniroute',processId:process.pid}}));
-    }).listen(${port},'127.0.0.1',()=>fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({args:process.argv.slice(2),preloaded:globalThis.embeddedTestPreloaded,nodeOptions:process.env.NODE_OPTIONS,startedAt})));`);
+      res.end(JSON.stringify({status:'healthy'}));
+    }).listen(${gatewayPort},'127.0.0.1',()=>fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({args:process.argv.slice(2),preloaded:globalThis.embeddedTestPreloaded,nodeOptions:process.env.NODE_OPTIONS,startedAt})));`);
   const envFile = path.join(directory, '.env');
   await fs.writeFile(envFile, 'NODE_OPTIONS=--trace-warnings\n');
   await fs.writeFile(path.join(directory, 'installation.json'), JSON.stringify({ version: 1, nodePath: process.execPath,
-    cliPath: cli, projectDir: directory, omniInstallDir: directory, envFile, preload: pathToFileURL(hook).href, serveArgs: ['serve', '--no-open'] }));
+    cliPath: cli, bridgePath: path.join(directory, 'bridge', 'server.mjs'), projectDir: directory, omniInstallDir: directory, envFile, preload: pathToFileURL(hook).href, serveArgs: ['serve', '--no-open'] }));
   const launcher = fileURLToPath(new URL('../scripts/start-integrated.mjs', import.meta.url));
   const exec = promisify(execFile);
   const env = { ...process.env, OMNI_SYNC_DATA_DIR: directory, NODE_OPTIONS: '--no-warnings' };
@@ -89,8 +104,9 @@ test('hidden launcher starts the CLI with its preload and avoids a duplicate gat
   assert.ok(started, 'The expected CLI entrypoint must actually start');
   assert.ok(Date.now() - started.startedAt >= 250, 'An open port must not count as readiness during initialization');
   assert.deepEqual(started.args, ['serve', '--no-open']);
-  assert.equal(started.preloaded, true);
+  assert.equal(started.preloaded, undefined);
   assert.ok(started.nodeOptions.includes('--no-warnings'));
+  assert.ok(!started.nodeOptions.includes(preload));
   const second = JSON.parse((await exec(process.execPath, [launcher], { env, windowsHide: true })).stdout);
   assert.equal(second.alreadyRunning, true);
   assert.equal(second.processId, undefined);

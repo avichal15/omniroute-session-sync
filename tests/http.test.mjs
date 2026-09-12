@@ -34,9 +34,10 @@ test('authorized updates acknowledge saved credentials and status contains no to
   assert.equal(r.status,200);assert.equal((await r.json()).success,true);
   const status=await(await f.call('/api/status')).text();assert.ok(!status.includes('secret-synthetic'));assert.ok(!status.includes(f.state.client.token));
 });
-test('readiness fails when OmniRoute is unavailable',async t=>{
+test('health stays locally available when OmniRoute is temporarily unavailable',async t=>{
   const f=await fixture(t);f.gateway.listConnections=async()=>{throw new Error('offline')};
-  const r=await fetch(f.base+'/health');assert.equal(r.status,503);assert.equal((await r.json()).ready,false);
+  const r=await fetch(f.base+'/health');const health=await r.json();
+  assert.equal(r.status,200);assert.equal(health.alive,true);assert.equal(health.ready,false);
 });
 test('pairing requires the owner-issued one-time code and clears prior profile mappings',async t=>{
   const f=await fixture(t);const owner={Authorization:'Bearer '+f.state.ownerToken,Origin:''};

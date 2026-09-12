@@ -89,9 +89,12 @@ export function createBridge({ gateway, service, state, persist, lifecycle = 'st
       if (requests.length >= 240) throw new BridgeError('RATE_LIMITED', 'Too many bridge requests; retry shortly', 429);
       requests.push(now);
       if (isHealth && req.method === 'GET') {
-        const health = await ready();
-        return reply(res, health.ready ? 200 : 503, { service: 'omniroute-session-sync', version: '2.0.0',
-          ready: health.ready, paired: Boolean(state.client), runtime });
+        // Liveness must not depend on a potentially busy OmniRoute event loop.
+        // Chrome can keep its session update pending and retry once the gateway is
+        // available again, but it must not mistake that for a dead local bridge.
+        return reply(res, 200, { service: 'omniroute-session-sync', version: '2.0.0', alive: true,
+          ready: readiness.ready === true, gatewayReady: readiness.ready === true,
+          paired: Boolean(state.client), runtime });
       }
       const token = /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];
       const owner = !origin && sameSecret(token, state.ownerToken);
@@ -145,6 +148,9 @@ export function createBridge({ gateway, service, state, persist, lifecycle = 'st
         let providers = []; let models = []; let error;
         try { providers = await service.status(); }
         catch (cause) { error = publicError(cause).message; }
+        readiness = error
+          ? { checkedAt: Date.now(), ready: false, error }
+          : { checkedAt: Date.now(), ready: true };
         if (!error) { try { models = await gateway.listModels(); } catch { /* Sync remains available if model discovery fails. */ } }
         return reply(res, 200, { success: true, paired: Boolean(state.client), bridge: { ready: !error, error },
           providers, models, fallback: state.fallback, runtime });
@@ -176,7 +182,7 @@ export function createBridge({ gateway, service, state, persist, lifecycle = 'st
   return server;
 }
 
-export async function main({ lifecycle = 'standalone' } = {}) {
+export async function main({ lifecycle = process.env.OMNI_SYNC_LIFECYCLE || 'standalone' } = {}) {
   const config = JSON.parse(await fs.readFile(process.env.OMNI_SYNC_CONFIG_FILE || new URL('./config.json', import.meta.url), 'utf8'));
   if (config.host !== '127.0.0.1' || !Number.isInteger(config.port) || config.port < 1024 || config.port > 65535)
     throw new BridgeError('INVALID_CONFIG', 'Configure a loopback bridge port between 1024 and 65535', 500);
@@ -187,6 +193,7 @@ export async function main({ lifecycle = 'standalone' } = {}) {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); });
   console.log(`Session Sync v2: http://${config.host}:${config.port}`);
   if (lifecycle === 'omniroute') console.log('Session Sync is running inside OmniRoute. Saved pairing resumes automatically.');
+  if (lifecycle === 'sidecar') console.log('Session Sync is running as a supervised local sidecar. Saved pairing resumes automatically.');
   console.log(`Private bridge configuration: ${filename}`);
   console.log('To pair Chrome, run: node scripts/pair.mjs');
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { server.close(); server.closeIdleConnections(); });

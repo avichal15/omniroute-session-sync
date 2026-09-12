@@ -20,12 +20,27 @@ export function addPreload(options, preload) {
   return options.split(/\s+/).includes(flag) ? options.trim() : [options.trim(), flag].filter(Boolean).join(' ');
 }
 
+export function removePreload(options, preload) {
+  if (/[\r\n\0]/.test(options) || /\s/.test(preload) || new URL(preload).protocol !== 'file:')
+    throw new Error('Node options must be a single line and the preload must be a local file URL.');
+  const flag = '--import=' + preload;
+  return options.split(/\s+/).filter(value => value && value !== flag).join(' ');
+}
+
 export function updateNodeOptions(content, preload) {
   const { lines, index } = optionLine(content);
   const newline = content.includes('\r\n') ? '\r\n' : '\n';
   const replacement = 'NODE_OPTIONS=' + addPreload(readNodeOptions(content), preload);
   if (index >= 0) { lines[index] = replacement; return lines.join(newline); }
   return content + (content && !content.endsWith('\n') ? newline : '') + replacement + newline;
+}
+
+export function removeNodeOptions(content, preload) {
+  const { lines, index } = optionLine(content);
+  if (index < 0) return content;
+  const newline = content.includes('\r\n') ? '\r\n' : '\n';
+  lines[index] = 'NODE_OPTIONS=' + removePreload(readNodeOptions(content), preload);
+  return lines.join(newline);
 }
 
 export function startupVbs(nodePath, launcherPath, { directory, configPath } = {}) {

@@ -6,8 +6,10 @@ import { supervisorRunning } from './integrated-runtime.mjs';
 try {
   const result = await localRequest('/api/status');
   console.log(`OmniRoute: ${result.bridge.ready ? 'ready' : result.bridge.error || 'unavailable'}`);
-  console.log(`Sync service: ${result.runtime?.lifecycle === 'omniroute' ? 'embedded in OmniRoute; starts with the gateway' : 'standalone'}`);
-  if (result.runtime?.lifecycle === 'omniroute') console.log(`Startup recovery: ${await supervisorRunning(dataDirectory()) ? 'running' : 'not running'}`);
+  const lifecycle = result.runtime?.lifecycle;
+  console.log(`Sync service: ${lifecycle === 'omniroute' ? 'embedded in OmniRoute; starts with the gateway'
+    : lifecycle === 'sidecar' ? 'supervised sidecar; starts with the gateway' : 'standalone'}`);
+  if (lifecycle === 'omniroute' || lifecycle === 'sidecar') console.log(`Startup recovery: ${await supervisorRunning(dataDirectory()) ? 'running' : 'not running'}`);
   console.log(`Chrome: ${result.paired ? 'paired' : 'not paired'}`);
   for (const p of result.providers) console.log(`${p.name}: ${p.phase}; connection ${p.connectionId || 'not selected'}; last saved ${p.lastSyncedAt || 'never'}`);
   console.log(`Fallback alias: ${result.fallback.saved ? result.fallback.name : 'not configured'}`);
