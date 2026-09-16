@@ -1,4 +1,6 @@
-﻿# OmniRoute Session Sync: Architecture and Operator Guide
+# OmniRoute Session Sync: Architecture and Operator Guide
+
+> **Third-party / community-maintained integration.** OmniRoute Session Sync is an independent companion project and is not part of the OmniRoute core codebase. The OmniRoute team has not audited this repository and does not endorse or guarantee its security, privacy, reliability, or compatibility. The security properties described below are implementation details of this project, not an OmniRoute security attestation. See [THIRD_PARTY_NOTICE.md](THIRD_PARTY_NOTICE.md).
 
 This guide explains how Session Sync captures browser session cookies from Google Chrome, forwards them to a local OmniRoute instance, and maintains automated model routing when web sessions rotate.
 
@@ -129,11 +131,11 @@ This stores the management credential in `%USERPROFILE%\.omniroute\session-sync\
 
 ### Step 4: Install the Chrome Extension
 
-1. Open Google Chrome and navigate to `chrome://extensions`.
-2. Turn on **Developer mode** using the toggle in the top right corner.
+1. Open Chrome and navigate to `chrome://extensions`.
+2. Turn on **Developer mode** in the top right corner.
 3. Click **Load unpacked**.
-4. Select the `extension` folder inside this project repository (`c:\omni\extension`).
-5. Confirm that **OmniRoute Session Sync** appears with version **2.0.0**.
+4. Select the `extension` folder inside this project repository.
+5. Confirm that **OmniRoute Session Sync** appears.
 
 ---
 
@@ -162,7 +164,7 @@ Pairing is permanent for that Chrome profile. You do not need to re-pair on subs
 1. In the popup, find the provider you wish to use (for example, **ChatGPT Web**).
 2. Open the dropdown and select the specific OmniRoute connection ID assigned to that account.
 3. Click **Apply**.
-4. Make sure you are signed in to that provider in your browser (e.g. `https://chatgpt.com`).
+4. Make sure you are signed in to that provider in your browser.
 5. Click **Sync** to force an initial cookie transfer.
 6. Click **Test** to run an upstream validation check through OmniRoute.
 
@@ -179,7 +181,7 @@ Status indicators:
 To prevent interruptions when a specific provider experiences rate limits or temporary outages, configure a fallback route:
 
 1. In the extension popup, expand the **Model Fallback** section.
-2. Select models from the available browser providers (e.g. `chatgpt-web/gpt-5.5`, `gemini-web/gemini-3.5-flash`, `qwen-web/qwen3.7-plus`, `zai-web/glm-5.3`).
+2. Select models from the available browser providers.
 3. Drag or order them by priority.
 4. Click **Save fallback**.
 
@@ -202,26 +204,16 @@ This creates an OmniRoute combo named `browser-sessions`. In your code or client
 
 Different providers update cookies on independent cycles. The extension maintains per-provider debouncing:
 - Cookie events for ChatGPT do not delay or block events from Gemini or Qwen.
-- Rapid successive cookie writes (such as session rotation plus analytics tokens) collapse into a single read of the latest cookie jar state.
+- Rapid successive cookie writes collapse into a single read of the latest cookie jar state.
 - In-flight HTTP sync requests do not overlap; new changes queue cleanly behind active transmissions.
 
 ### Cookie Sanitization & Chunk Reassembly
 
-Each provider has unique extraction logic defined in `extension/lib/cookieExtractors.js`:
-- **ChatGPT:** Reassembles chunked session cookies (`__Secure-next-auth.session-token.0`, `.1`, `.2`, etc.) in sequential numeric order.
-- **DeepSeek:** Rejects analytics-only identifiers (`HSSO_TOKEN`) and extracts authentic `userToken` sessions.
-- **Gemini:** Gathers the complete `__Secure-1PSID`, `__Secure-1PSIDTS`, `__Secure-1PSIDCC`, and `__Secure-1PAPISID` token chain.
-- **Qwen:** Reconstructs canonical headers from `chat.qwen.ai` without duplicating root domain cookies.
+Each provider has unique extraction logic defined in `extension/lib/cookieExtractors.js`.
 
 ### State Persistence & Redirection Protection
 
-On Windows, sandboxed applications (such as packaged editors or terminal hosts) can redirect `%LOCALAPPDATA%` into isolated `LocalCache` directories. If the startup launcher and the interactive terminal look at different paths, pairing records fail to resolve.
-
-Session Sync solves this by storing all state in:
-```
-%USERPROFILE%\.omniroute\session-sync\state.json
-```
-This path is uniform across native Windows scheduled tasks, user shells, and packaged runtimes.
+On Windows, sandboxed applications can redirect `%LOCALAPPDATA%` into isolated directories. Session Sync stores its state in `%USERPROFILE%\.omniroute\session-sync\state.json` so startup launchers and interactive terminals use a consistent path.
 
 ---
 
@@ -229,7 +221,7 @@ This path is uniform across native Windows scheduled tasks, user shells, and pac
 
 | Command | Purpose |
 | --- | --- |
-| `npm run verify` | Runs syntax checks across all 32 files and executes the 66-test test suite. |
+| `npm run verify` | Runs syntax checks and the test suite. |
 | `npm run status` | Inspects health of OmniRoute, bridge lifecycle, pairing status, and mapped accounts. |
 | `npm run setup:embedded` | Configures OmniRoute preload and Windows Scheduled Task autostart. |
 | `npm run start:integrated` | Launches OmniRoute with Session Sync supervisor in the background. |
@@ -248,10 +240,7 @@ node scripts/start-integrated.mjs
 Review the startup log at `%USERPROFILE%\.omniroute\session-sync\startup.log` for port conflicts or missing Node paths.
 
 ### Extension displays "Unknown action" or fails to pair
-This occurs if Chrome is still executing an older version of the background service worker.
-1. Open `chrome://extensions`.
-2. Click the **Reload** button on the OmniRoute Session Sync card.
-3. Open the extension popup, run `npm run pair`, and enter the fresh code.
+Open `chrome://extensions`, reload the extension, and pair with a fresh code.
 
 ### Status shows "Cloud sync must be disabled"
-OmniRoute has Cloud Sync active. Disable Cloud Sync in OmniRoute Settings under General or Cloud Settings. The bridge will not write credentials while Cloud Sync is enabled.
+OmniRoute has Cloud Sync active. Disable Cloud Sync in OmniRoute Settings and retry.
